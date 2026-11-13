@@ -32,7 +32,9 @@ services:
         value: "true"
       - key: DEMO_SEED
         value: "true"
+      # Starts in dry_run so the demo tickets stay open; switch to "on" in the
+      # Render dashboard during the demo and they close within a minute.
       - key: PIPELINE_CLEANUP
-        value: "on"
+        value: dry_run
       - key: PORT
         value: "3000"
