@@ -75,4 +75,4 @@ USER node
 # The server then backfills missing ledger points (#435, #539). That step does
 # not block the health check; a repeat start skips awards already written.
 # BACKFILL_POINTS_ON_START=0 skips it.
-CMD ["sh", "-c", "node scripts/migrate.mjs && node server.js"]
+CMD ["sh", "-c", "node scripts/migrate.mjs && sh scripts/demo/load-demo.sh && node server.js"]

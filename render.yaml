@@ -1,0 +1,38 @@
+# Demo deployment of the pipeline cleanup feature (PR #699) on Render's free plan.
+# Not production: password login is on and the demo data loads at start.
+databases:
+  - name: ziki-demo-db
+    plan: free
+    databaseName: ziki
+    user: ziki
+
+services:
+  - type: web
+    name: ziki-pipeline-demo
+    runtime: docker
+    plan: free
+    branch: demo/pipeline-cleanup-render
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    autoDeploy: false
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ziki-demo-db
+          property: connectionString
+      - key: AUTH_SECRET
+        generateValue: true
+      - key: CRON_SECRET
+        generateValue: true
+      - key: AUTH_URL
+        value: https://ziki-pipeline-demo.onrender.com/api/auth
+      - key: NEXTAUTH_URL
+        value: https://ziki-pipeline-demo.onrender.com/api/auth
+      - key: AUTH_PASSWORD_LOGIN
+        value: "true"
+      - key: DEMO_SEED
+        value: "true"
+      - key: PIPELINE_CLEANUP
+        value: "on"
+      - key: PORT
+        value: "3000"
