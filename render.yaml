@@ -1,10 +1,7 @@
 # Demo deployment of the pipeline cleanup feature (PR #699) on Render's free plan.
 # Not production: password login is on and the demo data loads at start.
-databases:
-  - name: ziki-demo-db
-    plan: free
-    databaseName: ziki
-    user: ziki
+# The database is an external free Postgres (Neon): Render allows one free
+# database per workspace. Paste its connection string as DATABASE_URL.
 
 services:
   - type: web
@@ -17,9 +14,7 @@ services:
     autoDeploy: false
     envVars:
       - key: DATABASE_URL
-        fromDatabase:
-          name: ziki-demo-db
-          property: connectionString
+        sync: false
       - key: AUTH_SECRET
         generateValue: true
       - key: CRON_SECRET
