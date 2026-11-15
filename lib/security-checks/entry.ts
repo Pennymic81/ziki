@@ -1,8 +1,9 @@
 import { randomBytes } from "node:crypto";
-import { Prisma, type SecurityCheckStatus, type SecurityTargetKind } from "@prisma/client";
+import { Prisma, type SecurityCheckStatus, type SecuritySeverity, type SecurityTargetKind } from "@prisma/client";
+import { SECURITY_SEVERITIES } from "@/lib/security-severity";
 import { prisma } from "@/lib/prisma";
 import type { PreviewSummary } from "./preview-summary";
-import { SECURITY_CHECK_PRICE_COINS, FINISHED_CHECK_STATUSES, FREE_SCANS_PER_WORKSPACE_PER_MONTH, freeScanAllowed, freeScanMonthStart } from "@/lib/security-checks";
+import { SECURITY_CHECK_PRICE_COINS, FINISHED_CHECK_STATUSES, FREE_SCANS_PER_WORKSPACE_PER_MONTH, freeScanAllowed, freeScanMonthStart, ownershipProofRequired } from "@/lib/security-checks";
 import type { ParsedTarget } from "@/lib/security-checks/target";
 
 /**
@@ -81,7 +82,8 @@ export async function addTargetAndCheck(
       free: true,
       priceCoins: SECURITY_CHECK_PRICE_COINS,
       // A target proven once never asks again: its new checks are ready for agents.
-      status: verified ? "queued" : "awaiting_ownership",
+      // No proof step while it's switched off (14 Nov plan): the check is queued at once.
+      status: verified || !ownershipProofRequired() ? "queued" : "awaiting_ownership",
     },
     select: { id: true },
   });
@@ -94,6 +96,48 @@ export function refusedMessage(refused: RefusedCheck["refused"], site: string, n
   const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
   const day = next.toLocaleDateString("en-GB", { day: "numeric", month: "long", timeZone: "UTC" });
   return `You've used this month's ${FREE_SCANS_PER_WORKSPACE_PER_MONTH} scans. More start on ${day}.`;
+}
+
+/**
+ * Remove one of this person's scans (#security-checks), finished or not (15 Nov:
+ * people can always remove their scans). It's cancelled, so agents stop and it
+ * leaves the list; findings already moved to the app stay there. False when it
+ * isn't theirs or is already removed.
+ */
+export async function removeOwnScan(organisationId: string, userId: string, checkId: string): Promise<boolean> {
+  const removed = await prisma.securityCheck.updateMany({
+    where: { id: checkId, organisationId, requestedById: userId, status: { not: "cancelled" } },
+    data: { status: "cancelled" },
+  });
+  return removed.count > 0;
+}
+
+/**
+ * A site this person has already scanned in this workspace (#security-checks):
+ * its latest check that wasn't cancelled, so the same site isn't scanned again.
+ */
+export async function findScannedCheck(organisationId: string, userId: string, target: ParsedTarget): Promise<{ checkId: string; summary: PreviewSummary | null } | null> {
+  const check = await prisma.securityCheck.findFirst({
+    where: {
+      organisationId,
+      requestedById: userId,
+      status: { not: "cancelled" },
+      target: { organisationId, kind: target.kind, value: target.value },
+    },
+    orderBy: { createdAt: "desc" },
+    select: { id: true, target: { select: { previewSummary: true } } },
+  });
+  // Its saved quick scan, so the person sees that result again instead of a new scan.
+  return check ? { checkId: check.id, summary: readQuickScan(check.target.previewSummary) } : null;
+}
+
+/** One of this person's scans in this workspace, with its site, for replacing its quick scan. */
+export async function findOwnScan(organisationId: string, userId: string, checkId: string) {
+  const check = await prisma.securityCheck.findFirst({
+    where: { id: checkId, organisationId, requestedById: userId },
+    select: { id: true, target: { select: { id: true, kind: true, value: true } } },
+  });
+  return check ? { checkId: check.id, targetId: check.target.id, target: { kind: check.target.kind, value: check.target.value } } : null;
 }
 
 async function findOrCreateTarget(organisationId: string, userId: string, target: ParsedTarget) {
@@ -128,9 +172,10 @@ export async function saveQuickScan(targetId: string, summary: PreviewSummary, n
   await prisma.securityTarget.update({ where: { id: targetId }, data: { previewSummary: summary, previewAt: now } });
 }
 
-/** Where the client goes next for a new check: show it's theirs, or, if already proven, back to Assets where its free scan starts. */
+/** Where the client goes next for a new check: the Security page with it open, or, only while the proof step is switched on, show it's theirs. */
 export function nextStepPath(check: { targetId: string; checkId: string; verified: boolean }): string {
-  return check.verified ? `/security?check=${encodeURIComponent(check.checkId)}&added=1` : `/security/targets/${check.targetId}/verify`;
+  if (ownershipProofRequired() && !check.verified) return `/security/targets/${check.targetId}/verify`;
+  return `/security?check=${encodeURIComponent(check.checkId)}`;
 }
 
 export type WorkspaceCheckRow = {
@@ -145,10 +190,45 @@ export type WorkspaceCheckRow = {
   /** Findings reported, and how many of them the client has unlocked. */
   findings: number;
   unlocked: number;
+  /** Findings already moved to the client's app as issues. */
+  moved: number;
+  /** The quick scan from when it was added, if any: counts and locked rows only. */
+  preview: PreviewSummary | null;
+  /**
+   * The agents' result once the report is posted (null before): the card shows it
+   * in place of the quick scan, which only stays while no agent has reported.
+   */
+  agentReport: AgentReport | null;
   createdAt: Date;
 };
 
-/** Where a site is, for the Assets sidebar: waiting for proof, being checked, or its report is ready to fix. */
+/** What a card shows of a posted report: Ziki's summary and each finding, worst first. */
+export type AgentReport = {
+  summary: string | null;
+  findings: { id: string; severity: SecuritySeverity; title: string; unlocked: boolean; moved: boolean }[];
+};
+
+/** A posted check's findings for its card, worst first and then by id so the order never wobbles. */
+export function agentReportOf(
+  summary: string | null,
+  results: readonly { id: string; severity: SecuritySeverity; title: string; unlockedAt: Date | null; findingId: string | null }[],
+): AgentReport {
+  const findings = results
+    .map((result) => ({ id: result.id, severity: result.severity, title: result.title, unlocked: result.unlockedAt !== null, moved: result.findingId !== null }))
+    .sort((a, b) => SECURITY_SEVERITIES.indexOf(a.severity) - SECURITY_SEVERITIES.indexOf(b.severity) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return { summary, findings };
+}
+
+/** A scan's place, on its card: being checked, its report ready, or findings moved to the app (14 Nov plan, C1). */
+export type ScanStage = "scanning" | "report" | "in_app" | "cancelled";
+
+export function scanStage(check: Pick<WorkspaceCheckRow, "status" | "posted" | "moved">): ScanStage {
+  if (check.status === "cancelled") return "cancelled";
+  if (check.moved > 0) return "in_app";
+  return check.posted ? "report" : "scanning";
+}
+
+/** Where a site was in the old steps (kept for when the proof step comes back). */
 export type SiteStage = "prove" | "checking" | "fix" | "cancelled";
 export const SITE_FILTERS = ["all", "prove", "checking", "fix"] as const;
 export type SiteFilter = (typeof SITE_FILTERS)[number];
@@ -174,9 +254,10 @@ export async function listWorkspaceChecks(organisationId: string, userId: string
       id: true,
       status: true,
       postedAt: true,
+      summary: true,
       createdAt: true,
-      target: { select: { id: true, kind: true, value: true, verifiedAt: true } },
-      results: { select: { unlockedAt: true } },
+      target: { select: { id: true, kind: true, value: true, verifiedAt: true, previewSummary: true } },
+      results: { select: { id: true, severity: true, title: true, unlockedAt: true, findingId: true } },
     },
   });
   return rows.map((row) => ({
@@ -189,6 +270,9 @@ export async function listWorkspaceChecks(organisationId: string, userId: string
     posted: row.postedAt !== null,
     findings: row.results.length,
     unlocked: row.results.filter((result) => result.unlockedAt !== null).length,
+    moved: row.results.filter((result) => result.findingId !== null).length,
+    preview: readQuickScan(row.target.previewSummary),
+    agentReport: row.postedAt !== null ? agentReportOf(row.summary, row.results) : null,
     createdAt: row.createdAt,
   }));
 }

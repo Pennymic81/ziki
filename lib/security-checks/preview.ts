@@ -8,7 +8,7 @@ import type { SecuritySeverity, SecurityTargetKind } from "@prisma/client";
 import { GitHubError, githubApiUrl, githubClientFor, installationIdForRepo } from "@/lib/github/client";
 import { logger } from "@/lib/logger";
 import { consumeRateLimit } from "@/lib/rate-limit";
-import { PREVIEW_SCANS_PER_VISITOR_PER_HOUR } from "@/lib/security-checks";
+import { PREVIEW_SCANS_PER_VISITOR_PER_HOUR, scanLimitsEnabled } from "@/lib/security-checks";
 import { isPublicAddress, PrivateAddressError, publicOnlyLookup, realNetwork } from "@/lib/security-checks/ownership";
 import { parseSecurityTarget } from "@/lib/security-checks/target";
 
@@ -111,7 +111,12 @@ const cache = new Map<string, { at: number; result: Extract<PreviewResult, { ok:
  */
 export async function previewScan(
   link: string,
-  { visitor, network = realPreviewNetwork, now = Date.now() }: { visitor: string; network?: PreviewNetwork; now?: number },
+  {
+    visitor,
+    network = realPreviewNetwork,
+    now = Date.now(),
+    limited = scanLimitsEnabled(),
+  }: { visitor: string; network?: PreviewNetwork; now?: number; limited?: boolean },
 ): Promise<PreviewResult> {
   const parsed = parseSecurityTarget(link);
   if (!parsed.ok) return { ok: false, reason: parsed.error };
@@ -121,8 +126,11 @@ export async function previewScan(
   const cached = cache.get(cacheKey);
   if (cached && now - cached.at < PREVIEW_CACHE_MS) return cached.result;
 
-  const limit = await consumeRateLimit(`security-preview:${visitor}`, { max: PREVIEW_SCANS_PER_VISITOR_PER_HOUR, windowMs: 60 * 60 * 1000 }, now);
-  if (!limit.allowed) return { ok: false, reason: LIMIT_REASON, retryAfterSeconds: Math.ceil(limit.retryAfterMs / 1000) };
+  // The per-visitor limit counts only while scan limits are on (14 Nov plan: off for now, not removed).
+  if (limited) {
+    const limit = await consumeRateLimit(`security-preview:${visitor}`, { max: PREVIEW_SCANS_PER_VISITOR_PER_HOUR, windowMs: 60 * 60 * 1000 }, now);
+    if (!limit.allowed) return { ok: false, reason: LIMIT_REASON, retryAfterSeconds: Math.ceil(limit.retryAfterMs / 1000) };
+  }
 
   try {
     const result = kind === "repo" ? await scanRepo(value, network, now) : await scan(kind, value, network, now);

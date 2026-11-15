@@ -1,12 +1,14 @@
 import "server-only";
 
 import type { Prisma, PrismaClient, SecuritySeverity } from "@prisma/client";
+import { SECURITY_SEVERITIES } from "@/lib/security-severity";
 import { z } from "zod";
 import { convertClientVettedIdea } from "@/lib/agent-api/idea-verdicts";
 import { issuePath } from "@/lib/issue-ref";
 import { prisma } from "@/lib/prisma";
 import { refOf } from "@/lib/project-paths";
-import { isReportPosted, isResultUnlocked } from "@/lib/security-checks";
+import { isReportPosted } from "@/lib/security-checks";
+import { findingPrice, payForFindings } from "@/lib/security-checks/payment";
 import { createFinding, PLACEHOLDER_DESCRIPTION, PLACEHOLDER_SUMMARY, placeholderTitle } from "@/lib/security-findings";
 
 const id = z.string().trim().min(1).max(128);
@@ -20,7 +22,7 @@ export const fixSelection = z.object({
 export type FixProject = { id: string; name: string };
 export type FixOptions = { projects: FixProject[]; projectId: string | null };
 export type FixOutcome =
-  | { ok: true; created: number; reused: number; issues: { number: number; href: string }[] }
+  | { ok: true; created: number; reused: number; coins: number; issues: { resultId: string; number: number; href: string }[] }
   | { ok: false; error: string };
 
 type Client = { userId: string; organisationId: string; superAdmin: boolean };
@@ -28,7 +30,7 @@ type Check = { postedAt: Date | null; projectId: string | null };
 type Result = { id: string; severity: SecuritySeverity; finding: { bug: { number: number } | null } | null };
 
 const unavailable = { ok: false, error: "This check is unavailable in your workspace." } as const;
-const locked = { ok: false, error: "Unlock every selected finding before sending it to a project." } as const;
+
 
 // Workspace members can contribute to its projects under the board's existing
 // access rules. Recheck membership in the same query that scopes the project.
@@ -49,7 +51,7 @@ export async function listFixProjects(client: Client, checkId: string, db = pris
       id: checkId,
       requestedById: client.userId,
       organisationId: client.organisationId,
-      results: { some: { unlockedAt: { not: null } } },
+
     },
     select: { postedAt: true, projectId: true },
   });
@@ -91,27 +93,26 @@ export async function sendCheckFindings(
 
     const results = await tx.securityCheckResult.findMany({
       where: { checkId, id: { in: resultIds } },
-      select: { id: true, severity: true, unlockedAt: true, finding: { select: { bug: { select: { number: true } } } } },
+      select: { id: true, severity: true, finding: { select: { bug: { select: { number: true } } } } },
     });
     if (results.length !== resultIds.length) {
       return { ok: false, error: "One or more selected findings are unavailable in this check." };
     }
 
-    // Reject the entire selection before any writes if one finding is locked.
-    if (results.some((result) => !isResultUnlocked(result))) return locked;
+    const { coins } = await payForFindings(tx, checkId, results.filter((result) => !result.finding).map((result) => result.id));
 
     let created = 0;
-    const issues: { number: number; href: string }[] = [];
+    const issues: { resultId: string; number: number; href: string }[] = [];
     for (const result of results) {
       const number = result.finding
         ? result.finding.bug?.number
         : await createResultIssue(tx, client, projectId, checkId, result);
       if (!result.finding) created += 1;
-      if (number !== undefined) issues.push({ number, href: issuePath(refOf(project), number) });
+      if (number !== undefined) issues.push({ resultId: result.id, number, href: issuePath(refOf(project), number) });
     }
     if (!check.projectId) await tx.securityCheck.update({ where: { id: checkId }, data: { projectId } });
-    return { ok: true, created, reused: results.length - created, issues };
-  }, { timeout: 30_000 });
+    return { ok: true, created, reused: results.length - created, coins, issues };
+  }, { timeout: 30_000, isolationLevel: "ReadCommitted" });
 }
 
 async function createResultIssue(tx: Prisma.TransactionClient, client: Client, projectId: string, checkId: string, result: Result) {
@@ -150,4 +151,38 @@ async function createResultIssue(tx: Prisma.TransactionClient, client: Client, p
   const issue = await convertClientVettedIdea(tx, scope, idea.id, client.userId);
   await tx.securityCheckResult.update({ where: { id: result.id }, data: { findingId: finding.id } });
   return issue.issueNumber;
+}
+
+export async function loadMovePage(client: Client, checkId: string, db = prisma) {
+  const parsed = fixCheckId.safeParse(checkId);
+  if (!parsed.success) return null;
+  const check = await db.securityCheck.findFirst({
+    where: { id: parsed.data, organisationId: client.organisationId, requestedById: client.userId },
+    select: { postedAt: true, target: { select: { value: true } } },
+  });
+  if (!check) return null;
+  const results = check.postedAt ? await db.securityCheckResult.findMany({
+    where: { checkId: parsed.data },
+    select: {
+      id: true, severity: true, title: true, priceCoins: true, unlockedAt: true, findingId: true,
+      finding: { select: { bug: { select: {
+        number: true, project: { select: { slug: true, organisation: { select: { slug: true } } } },
+      } } } },
+    },
+    orderBy: { id: "asc" },
+  }) : [];
+  return {
+    asset: check.target.value,
+    posted: Boolean(check.postedAt),
+    results: results.sort((a, b) => SECURITY_SEVERITIES.indexOf(a.severity) - SECURITY_SEVERITIES.indexOf(b.severity))
+      .map((result) => {
+        const issue = result.finding?.bug;
+        return {
+          id: result.id, severity: result.severity, title: result.title,
+          price: result.unlockedAt || result.findingId ? 0 : findingPrice(result),
+          moved: Boolean(result.findingId),
+          issue: issue && { number: issue.number, href: issuePath(refOf(issue.project), issue.number) },
+        };
+      }),
+  };
 }

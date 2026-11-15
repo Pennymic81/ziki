@@ -216,20 +216,42 @@ describe("preview scan (#security-checks, 12 Nov plan D3)", () => {
     expect(bare.ok && bare.findings.find((f) => f.id === "missing-spf")?.detail).toContain("settle.ng has no SPF record");
   });
 
-  it("limits each visitor to a few previews an hour, and reuses a recent result without counting it", async () => {
+  it("with scan limits on, limits each visitor to a few previews an hour, and reuses a recent result without counting it", async () => {
     const net = network(WELL_KEPT);
     const sites = Array.from({ length: PREVIEW_SCANS_PER_VISITOR_PER_HOUR + 1 }, (_, i) => `site${i}.ng`);
     const results = [];
     for (const site of sites) {
-      results.push(await previewScan(site, { visitor: "same-ip", network: network({ ...WELL_KEPT, pages: { [`https://${site}/`]: { headers: SAFE_HEADERS } } }), now: NOW }));
+      results.push(await previewScan(site, { visitor: "same-ip", network: network({ ...WELL_KEPT, pages: { [`https://${site}/`]: { headers: SAFE_HEADERS } } }), now: NOW, limited: true }));
     }
     expect(results.slice(0, -1).every((r) => r.ok)).toBe(true);
     expect(results.at(-1)).toMatchObject({ ok: false, retryAfterSeconds: expect.any(Number) });
 
     // A link scanned a moment ago comes from the cache, even for a visitor at the limit.
-    const cached = await previewScan("site0.ng", { visitor: "same-ip", network: net, now: NOW + 60_000 });
+    const cached = await previewScan("site0.ng", { visitor: "same-ip", network: net, now: NOW + 60_000, limited: true });
     expect(cached).toMatchObject({ ok: true, target: "site0.ng" });
     expect(net.page).not.toHaveBeenCalled();
+  });
+
+  it("with scan limits off (14 Nov plan), never stops a visitor", async () => {
+    const sites = Array.from({ length: PREVIEW_SCANS_PER_VISITOR_PER_HOUR + 3 }, (_, i) => `open${i}.ng`);
+    for (const site of sites) {
+      const result = await previewScan(site, { visitor: "busy-ip", network: network({ ...WELL_KEPT, pages: { [`https://${site}/`]: { headers: SAFE_HEADERS } } }), now: NOW, limited: false });
+      expect(result).toMatchObject({ ok: true, target: site });
+    }
+  });
+
+  it("reads the scan-limits setting: off unless SECURITY_SCAN_LIMITS_ENABLED is true", async () => {
+    const before = process.env.SECURITY_SCAN_LIMITS_ENABLED;
+    try {
+      delete process.env.SECURITY_SCAN_LIMITS_ENABLED;
+      for (let i = 0; i < PREVIEW_SCANS_PER_VISITOR_PER_HOUR + 1; i++) {
+        const site = `env${i}.ng`;
+        expect(await previewScan(site, { visitor: "env-ip", network: network({ ...WELL_KEPT, pages: { [`https://${site}/`]: { headers: SAFE_HEADERS } } }), now: NOW })).toMatchObject({ ok: true });
+      }
+    } finally {
+      if (before === undefined) delete process.env.SECURITY_SCAN_LIMITS_ENABLED;
+      else process.env.SECURITY_SCAN_LIMITS_ENABLED = before;
+    }
   });
 
   it("doesn't hold an IP-reached server to a name on its certificate", () => {

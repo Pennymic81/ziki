@@ -1,4 +1,4 @@
-import type { SecuritySeverity } from "@prisma/client";
+import type { Prisma, SecuritySeverity } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { SEVERITY_PRICE, unlockTotal } from "@/lib/security-checks";
 
@@ -8,7 +8,7 @@ import { SEVERITY_PRICE, unlockTotal } from "@/lib/security-checks";
  * choose. Payment is simulated for now: unlocking only sets
  * `SecurityCheckResult.unlockedAt`. That one field shows the finding's details
  * and fix (isResultUnlocked) and lets the engine pay its finder, once. The
- * coin team replaces the inside of `unlockFindings` later.
+ * coin team replaces the inside of `payForFindings` later.
  */
 
 export type UnlockOutcome =
@@ -40,16 +40,22 @@ export async function unlockFindings(
   if (!check) return { ok: false, reason: "not_found" };
   if (!check.postedAt) return { ok: false, reason: "not_posted" };
 
-  const locked = await prisma.securityCheckResult.findMany({
-    where: { checkId, unlockedAt: null, ...(which === "all" ? {} : { id: { in: which } }) },
-    select: { id: true, severity: true, priceCoins: true },
-  });
-  if (locked.length === 0) return { ok: false, reason: "nothing_to_unlock" };
+  const paid = await payForFindings(prisma, checkId, which, now);
+  if (paid.unlocked === 0) return { ok: false, reason: "nothing_to_unlock" };
+  return { ok: true, ...paid };
+}
 
-  const { count } = await prisma.securityCheckResult.updateMany({
-    where: { id: { in: locked.map((result) => result.id) }, checkId, unlockedAt: null },
+/** Simulated payment for authorized results. Both checkout flows use this operation. */
+export async function payForFindings(
+  db: Pick<Prisma.TransactionClient, "securityCheckResult">,
+  checkId: string,
+  which: "all" | string[],
+  now = new Date(),
+) {
+  const paid = await db.securityCheckResult.updateManyAndReturn({
+    where: { checkId, unlockedAt: null, ...(which === "all" ? {} : { id: { in: which } }) },
     data: { unlockedAt: now },
+    select: { severity: true, priceCoins: true },
   });
-  if (count === 0) return { ok: false, reason: "nothing_to_unlock" };
-  return { ok: true, unlocked: count, coins: unlockTotal(locked) };
+  return { unlocked: paid.length, coins: unlockTotal(paid) };
 }
