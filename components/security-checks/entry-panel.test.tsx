@@ -44,6 +44,16 @@ describe("SecurityChecksPanel (#security-checks, 14 Nov plan)", () => {
     expect(html).not.toContain("Show it&#x27;s yours");
     expect(html).not.toContain("Your scans");
     expect(html).not.toContain("free");
+    // The three steps under the box, as on the Ideas page you see first.
+    expect(html).toContain("Say what to secure");
+    expect(html).toContain("Get a quick scan");
+    expect(html).toContain("See what&#x27;s wrong");
+  });
+
+  it("shows the welcome again when every scan was removed", () => {
+    const html = renderToStaticMarkup(<SecurityChecksPanel checks={[row({ status: "cancelled" })]} />);
+    expect(html).toContain("What do you want to secure?");
+    expect(html).not.toContain("No scans here yet");
   });
 
   it("keeps the box on top and lists the scans as rows, each with its stage, opening its page with one click", () => {
@@ -128,8 +138,8 @@ describe("SecurityChecksPanel (#security-checks, 14 Nov plan)", () => {
     );
     // Counted from the agents' findings (1 high, 1 low); the findings themselves are on the scan's page.
     expect(html).toContain("Agents&#x27; report");
-    expect(html).toContain('title="1 high"');
-    expect(html).toContain('title="1 low"');
+    expect(html).toContain('title="1 high problem, from the agents&#x27; report.');
+    expect(html).toContain('title="1 low problem, from the agents&#x27; report.');
     expect(html).not.toContain("Session cookie has no Secure flag");
     // The browser scan only stays while no agent has reported.
     expect(html).not.toContain("No Content Security Policy");

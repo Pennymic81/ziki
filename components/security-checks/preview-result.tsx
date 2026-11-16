@@ -75,7 +75,7 @@ export function PreviewResult({ summary, children }: { summary: PreviewSummary; 
               <span
                 aria-hidden="true"
                 className={`absolute inset-y-2 left-0 w-1 rounded-r ${area.problems ? `security-severity security-severity--${worstIn(area.area)}` : "bg-zk-ok-fg"}`}
-                style={area.problems ? { background: "currentColor" } : undefined}
+                style={area.problems ? { background: "var(--sev-dot)" } : undefined}
               />
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <h4 className="m-0 text-sm font-semibold text-zk-text">{area.label}</h4>

@@ -2,8 +2,9 @@ import type { Prisma, PrismaClient, SecurityCheckStatus, SecuritySeverity } from
 import { award } from "@/lib/points/award";
 import { logger } from "@/lib/logger";
 import { ON_CALL_QUIET_AFTER_MS, SEVERITY_PRICE, ZIKI_SECURITY_AGENT_USERNAME, agentsMayWork, fallbackWindowMs, ownershipProofRequired, provenTargetWhere } from "@/lib/security-checks";
-import { planParts, writeSummary, type PageReader, type SecurityAi } from "./ai";
+import { cleanParts, planParts, writeSummary, type PageReader, type PlannedPart, type SecurityAi } from "./ai";
 import { pickAgentFor, type CandidateAgent } from "./assign";
+import { quickScanForAgents, type QuickScanLine } from "./preview-summary";
 import { realNetwork } from "./ownership";
 
 /**
@@ -44,6 +45,12 @@ export const MAX_OPEN_JOBS_PER_AGENT = 2;
 /** A split or summary whose run crashed is retried after this long. */
 export const STUCK_AFTER_MINUTES = 10;
 export const MAX_RESULTS_PER_PART = 20;
+/**
+ * Ziki's list is where a check starts; an agent that finds something worth looking at that no part covers
+ * may add parts with its report (15 Nov call). A few per report, and a ceiling per check so it can't grow for ever.
+ */
+export const MAX_MORE_PARTS_PER_REPORT = 3;
+export const MAX_PARTS_PER_CHECK = 40;
 /**
  * Shown on Your work until it moves to per-finding earnings (12 Nov plan C1).
  * Parts no longer pay by themselves: the finder of each unlocked finding earns its price.
@@ -112,24 +119,32 @@ export async function startCheck(db: EngineDb, checkId: string, now = new Date()
   });
   if (count !== 1) return false;
 
-  const check = await db.securityCheck.findUnique({ where: { id: checkId }, select: { target: { select: { kind: true, value: true } } } });
-  if (!check) return false;
-  const { parts } = await planParts(check.target, {
-    ai: deps.ai,
-    readPage: deps.readPage === undefined ? readPublicPage : deps.readPage,
-  });
+  let saved: boolean;
+  try {
+    const check = await db.securityCheck.findUnique({ where: { id: checkId }, select: { target: { select: { kind: true, value: true } } } });
+    if (!check) return false;
+    const { parts } = await planParts(check.target, {
+      ai: deps.ai,
+      readPage: deps.readPage === undefined ? readPublicPage : deps.readPage,
+    });
 
-  const saved = await db.$transaction(async (tx) => {
-    const { count: still } = await tx.securityCheck.updateMany({
-      where: { id: checkId, status: "splitting", startedAt: now, items: { none: { kind: "check" } } },
-      data: { status: "checking" },
+    saved = await db.$transaction(async (tx) => {
+      const { count: still } = await tx.securityCheck.updateMany({
+        where: { id: checkId, status: "splitting", startedAt: now, items: { none: { kind: "check" } } },
+        data: { status: "checking" },
+      });
+      if (still !== 1) return false;
+      await tx.securityCheckItem.createMany({
+        data: parts.map((part) => ({ checkId, kind: "check" as const, title: part.title, instructions: part.instructions })),
+      });
+      return true;
     });
-    if (still !== 1) return false;
-    await tx.securityCheckItem.createMany({
-      data: parts.map((part) => ({ checkId, kind: "check" as const, title: part.title, instructions: part.instructions })),
-    });
-    return true;
-  });
+  } catch (error) {
+    // Claimed but never split: give it back to waiting now, so the next sweep starts it again, instead of
+    // leaving it on "Planning the checks" until the stuck-split recovery (STUCK_AFTER_MINUTES).
+    await db.securityCheck.updateMany({ where: { id: checkId, status: "splitting", startedAt: now, items: { none: { kind: "check" } } }, data: { status: "queued", startedAt: null } }).catch(() => undefined);
+    throw error;
+  }
   if (saved) await assignWaitingJobs(db, new Date());
   return saved;
 }
@@ -276,7 +291,8 @@ export type SecurityJob = {
   instructions: string | null;
   assignedAt: Date | null;
   reportBy: Date | null;
-  check: { id: string; target: { kind: string; value: string } };
+  /** `quickScan`: what the quick browser scan already saw on this site (short titles only), so your report agrees with it where you look at the same thing. */
+  check: { id: string; target: { kind: string; value: string; quickScan: QuickScanLine[] } };
 };
 
 /** The parts this agent holds now. It is given waiting parts first if it has room. */
@@ -290,11 +306,12 @@ export async function listAgentJobs(db: Db, agentId: string, now = new Date()): 
       title: true,
       instructions: true,
       assignedAt: true,
-      check: { select: { id: true, target: { select: { kind: true, value: true } } } },
+      check: { select: { id: true, target: { select: { kind: true, value: true, previewSummary: true } } } },
     },
   });
-  return items.map((item) => ({
+  return items.map(({ check, ...item }) => ({
     ...item,
+    check: { id: check.id, target: { kind: check.target.kind, value: check.target.value, quickScan: quickScanForAgents(check.target.previewSummary) } },
     kind: "check" as const,
     reportBy: item.assignedAt ? new Date(item.assignedAt.getTime() + JOB_TIMEOUT_MINUTES * 60_000) : null,
   }));
@@ -325,10 +342,20 @@ export type ResultInput = { severity: SecuritySeverity; title: string; descripti
 
 /**
  * A part's report: stores what was found (possibly nothing), each priced by
- * its severity. When it is the last part, the caller posts the report
- * (`postReportIfComplete`) after this returns.
+ * its severity, and any more parts the agent asks for (`moreParts`: new, not already
+ * on the check, a few per report, up to MAX_PARTS_PER_CHECK in all). They are saved
+ * in the same step as the report, while the agent's own part is still the one holding the
+ * check open, so a check never finishes with parts waiting to be saved. When it is the last
+ * part, the caller posts the report (`postReportIfComplete`) after this returns.
  */
-export async function submitReport(db: Transactional, agentId: string, itemId: string, results: ResultInput[], now = new Date()) {
+export async function submitReport(
+  db: Transactional,
+  agentId: string,
+  itemId: string,
+  results: ResultInput[],
+  now = new Date(),
+  moreParts: ReadonlyArray<PlannedPart> = [],
+) {
   if (results.length > MAX_RESULTS_PER_PART) {
     throw new SecurityJobError(400, "too_many_results", `Report at most ${MAX_RESULTS_PER_PART} problems for one part.`);
   }
@@ -352,8 +379,25 @@ export async function submitReport(db: Transactional, agentId: string, itemId: s
         })),
       });
     }
-    return { checkId: item.checkId, results: results.length };
+    const addedParts = await addMoreParts(tx, item.checkId, moreParts);
+    return { checkId: item.checkId, results: results.length, addedParts };
   });
+}
+
+/** Saves the parts an agent asked to add: only new titles, a few per report, within the check's ceiling. Returns how many. */
+async function addMoreParts(tx: Tx, checkId: string, asked: ReadonlyArray<PlannedPart>): Promise<number> {
+  if (asked.length === 0) return 0;
+  const existing = await tx.securityCheckItem.findMany({ where: { checkId, kind: "check" }, select: { title: true } });
+  const taken = new Set(existing.map((part) => part.title.trim().toLowerCase()));
+  const room = Math.max(0, MAX_PARTS_PER_CHECK - existing.length);
+  const fresh = cleanParts(asked)
+    .filter((part) => !taken.has(part.title.toLowerCase()))
+    .slice(0, Math.min(MAX_MORE_PARTS_PER_REPORT, room));
+  if (fresh.length === 0) return 0;
+  await tx.securityCheckItem.createMany({
+    data: fresh.map((part) => ({ checkId, kind: "check" as const, title: part.title, instructions: part.instructions })),
+  });
+  return fresh.length;
 }
 
 /** Gives a part back for another agent. */

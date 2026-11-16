@@ -10,11 +10,27 @@ import "../issues/new/create-issue.css";
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = { title: "Submit an issue", robots: NOINDEX };
 
-export default async function PublicReportPage({ params }: { params: Promise<{ org: string; project: string }> }) {
-  const { org, project: projectSlug } = await params;
+export default async function PublicReportPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ org: string; project: string }>;
+  searchParams: Promise<{ type?: string }>;
+}) {
+  const [{ org, project: projectSlug }, query] = await Promise.all([params, searchParams]);
   const ref = { orgSlug: org, projectSlug };
   const project = await findPublicProject(ref, { requireGuestIntake: true });
   if (!project) notFound();
+
+  const isImprovement = query.type === "improvement";
+  const heading = isImprovement
+    ? "Suggest an improvement"
+    : query.type === "problem"
+      ? "Report a problem"
+      : "Report an issue";
+  const subtitle = isImprovement
+    ? "Share what you would like improved, who it helps, and how it should work."
+    : "Give the team the full picture: what you did, what you expected, and what happened instead.";
 
   return (
     <div className="create-issue-page mx-auto w-full min-w-0 space-y-6 pb-10">
@@ -28,8 +44,8 @@ export default async function PublicReportPage({ params }: { params: Promise<{ o
           </svg>
           Back to {project.name}
         </Link>
-        <h1>Report an issue</h1>
-        <p>Give the team the full picture: what you did, what you expected, and what happened instead.</p>
+        <h1>{heading}</h1>
+        <p>{subtitle}</p>
       </div>
       <section className="create-issue-card border border-zk-border bg-zk-surface">
         <PublicIdeaForm orgSlug={org} projectSlug={projectSlug} />

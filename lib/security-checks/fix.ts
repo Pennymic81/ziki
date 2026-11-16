@@ -8,6 +8,7 @@ import { issuePath } from "@/lib/issue-ref";
 import { prisma } from "@/lib/prisma";
 import { refOf } from "@/lib/project-paths";
 import { isReportPosted } from "@/lib/security-checks";
+import { CoinError } from "@/lib/coins/ledger";
 import { findingPrice, payForFindings } from "@/lib/security-checks/payment";
 import { createFinding, PLACEHOLDER_DESCRIPTION, PLACEHOLDER_SUMMARY, placeholderTitle } from "@/lib/security-findings";
 
@@ -99,7 +100,19 @@ export async function sendCheckFindings(
       return { ok: false, error: "One or more selected findings are unavailable in this check." };
     }
 
-    const { coins } = await payForFindings(tx, checkId, results.filter((result) => !result.finding).map((result) => result.id));
+    // The findings being sent are paid for in Ziks from the client's wallet, in this same transaction. Short of Ziks,
+    // nothing is charged, unlocked or created.
+    let paid;
+    try {
+      paid = await payForFindings(tx, client.userId, checkId, results.filter((result) => !result.finding).map((result) => result.id));
+    } catch (error) {
+      if (error instanceof CoinError && error.code === "closed") return { ok: false, error: "These findings changed while you were sending them. Try again." };
+      throw error;
+    }
+    if (!paid.ok) {
+      return { ok: false, error: `You need ${paid.needed.toLocaleString("en-US")} Ziks to send these findings and have ${paid.balance.toLocaleString("en-US")}. Buy Ziks on your Ziks page.` };
+    }
+    const { coins } = paid;
 
     let created = 0;
     const issues: { resultId: string; number: number; href: string }[] = [];

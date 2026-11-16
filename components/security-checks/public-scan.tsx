@@ -6,7 +6,6 @@ import { useEffect, useState, useTransition } from "react";
 import { createPortal } from "react-dom";
 import { SCAN_STEP_MS } from "./scan-progress";
 import { runPublicScan } from "@/app/actions/security-preview";
-import { addSecurityAsset } from "@/app/actions/security-assistant";
 import { parseSecurityTarget, targetAddress } from "@/lib/security-checks/target";
 import type { PreviewSummary } from "@/lib/security-checks/preview-summary";
 import { PreviewResult } from "./preview-result";
@@ -27,8 +26,9 @@ export function addAssetPath(target: string): string {
 /**
  * The box on the public Ziki Security page (#security-checks, part C2): one
  * field, no AI. Dave's quick scan looks at the site and the result shows the
- * counts only. Signed out, the next step is signing up (the address comes
- * along to the Security page); signed in, it's added to their scans straight away.
+ * counts only. Signed out, the next step is signing up; signed in, it is adding it. Either way the
+ * address comes along to the Security page, which asks which workspace it goes in (if they have
+ * more than one) and starts the scan.
  */
 export function PublicScan({ signedIn }: { signedIn: boolean }) {
   const router = useRouter();
@@ -42,7 +42,7 @@ export function PublicScan({ signedIn }: { signedIn: boolean }) {
   const [step, setStep] = useState(0);
   const STEPS = repo ? REPO_STEPS : SITE_STEPS;
   const [pending, startTransition] = useTransition();
-  const [adding, startAdding] = useTransition();
+  const [adding, setAdding] = useState(false);
   // The result opens below the header, like the prototype: in the page's own slot, not over the photo.
   // Only after a scan starts, so the first render matches the server's.
   const open = pending || summary !== null || (note !== null && site !== null);
@@ -88,13 +88,15 @@ export function PublicScan({ signedIn }: { signedIn: boolean }) {
     });
   }
 
+  /**
+   * Signed in: the same road a new sign-up takes, so the Security page decides what to ask (which workspace
+   * it goes in, or to make one) and then starts the scan. It used to add the site to whichever workspace
+   * happened to be open, with no question asked (15 Nov call).
+   */
   function addToScans() {
-    if (!site) return;
-    startAdding(async () => {
-      const answer = await addSecurityAsset(site);
-      if (answer.kind === "go") router.push(answer.href);
-      else setNote(answer.kind === "error" ? answer.error : answer.reply);
-    });
+    if (!site || adding) return;
+    setAdding(true);
+    router.push(addAssetPath(site));
   }
 
   const next = site ? (

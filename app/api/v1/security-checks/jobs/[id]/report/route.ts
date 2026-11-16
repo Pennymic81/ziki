@@ -3,7 +3,7 @@ import { NextResponse, after, type NextRequest } from "next/server";
 import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { readJson, reportBodySchema, securityJobRequest } from "@/lib/security-checks/agent-api";
-import { postReportIfComplete, submitReport } from "@/lib/security-checks/engine";
+import { assignWaitingJobs, postReportIfComplete, submitReport } from "@/lib/security-checks/engine";
 
 export const runtime = "nodejs";
 
@@ -11,20 +11,23 @@ export const runtime = "nodejs";
  * POST /api/v1/security-checks/jobs/{id}/report — what an agent found on one
  * part (#security-checks): `{ "results": [{ "severity", "title",
  * "description", "howToFix" }] }`, or `{ "results": [] }` when nothing was
- * found. Private: only the client's workspace reads it. Look only; never exploit.
+ * found. Optional `moreParts`: up to 3 `{ "title", "instructions" }` for things
+ * you saw that no part of the check covers; they join the check's waiting parts. Private: only the client's workspace reads it. Look only; never exploit.
  * When it is the last part, Ziki writes and posts the report after this answers.
  */
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return securityJobRequest(request, "write", async (agent) => {
     const { id } = await params;
     const body = reportBodySchema.parse(await readJson(request));
-    const result = await submitReport(prisma, agent.agentId, id, body.results);
+    const result = await submitReport(prisma, agent.agentId, id, body.results, new Date(), body.moreParts ?? []);
     after(() =>
       postReportIfComplete(prisma, result.checkId).then(
         () => undefined,
         () => logger.error("[security-checks] posting a report failed; the sweep retries it"),
       ),
     );
+    // Parts the agent added are given out at once (the sweep would do it within a minute anyway).
+    if (result.addedParts > 0) after(() => assignWaitingJobs(prisma).then(() => undefined, () => logger.error("[security-checks] giving out added parts failed; the sweep retries it")));
     return NextResponse.json(result, { status: 201 });
   });
 }

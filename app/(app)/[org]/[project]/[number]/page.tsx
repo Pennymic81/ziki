@@ -3,7 +3,7 @@ import { ASKABLE_STATUSES } from "@/lib/validations/support-thread";
 import { MergerTransparencyCard } from "@/components/merger-transparency-card";
 import { requireProject } from "@/lib/project-route";
 import Link from "next/link";
-import { ideaPath, issuesPath, projectRef, refOf } from "@/lib/project-paths";
+import { designPath, ideaPath, issuesPath, projectRef, refOf } from "@/lib/project-paths";
 import { MarketingAreaMarker } from "@/components/marketing/marketing-area";
 import { MarketingTaskDetail } from "@/components/marketing/marketing-task-detail";
 import { entryReplySelect, toEntryReplies } from "@/lib/agent-api/entry-fields";
@@ -54,6 +54,8 @@ import { IssueComments } from "@/components/comment-thread";
 import { AgentSteerPanel } from "@/components/agent-steer-panel";
 import { CommentComposer } from "@/components/comment-composer";
 import { AwardBox } from "@/components/award-box";
+import { FundIssueSection } from "@/components/coins/fund-issue-section";
+import { dollarsToZiks } from "@/lib/coins/math";
 import { PlanReviewCard, type PlanCardView } from "@/components/plan-review-card";
 import { currentPlan, planDeadline, type PlanView } from "@/lib/agent-api/plan";
 import { difficultyLabel } from "@/lib/difficulty";
@@ -867,6 +869,8 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
     prisma.bug.findUnique({ where: { id: bug.id }, select: { reward: true, rewardFixedAt: true } }),
     loadOptional<Awaited<ReturnType<typeof rewardEstimatesFor>>>("reward estimates", [], () => rewardEstimatesFor(bug.id)),
   ]);
+  // #ziki-coins: the agreed estimate, once anyone has given one (never the $1 an issue starts with), for the funding box in the Reward card.
+  const fundingEstimate = rewardRow && rewardEstimates.length > 0 ? { dollars: Number(rewardRow.reward), count: rewardEstimates.length } : null;
   const confirmationsData = await loadOptional<(ConfirmationsData & { confirmed?: boolean }) | null>("confirmations", null, () =>
     // #confirmation-files: other confirmers' files show once the viewer has confirmed (admins always).
     listConfirmations({ organisationId: bug.organisationId, projectId: bug.projectId }, bug.id, { userId: user.id, admin: canChooseRedesign }),
@@ -1856,13 +1860,15 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
             {rewardRow ? (
               <IssueRewardPanel
                 bugId={bug.id}
-                reward={Number(rewardRow.reward)}
+                reward={dollarsToZiks(Number(rewardRow.reward))}
                 fixed={Boolean(rewardRow.rewardFixedAt)}
                 estimates={rewardEstimates}
                 viewerId={user.id}
                 canEstimate={!bug.isDeleted && bug.status !== "closed"}
                 caption="paid upon accepted delivery"
-              />
+              >
+                <FundIssueSection bugId={bug.id} userId={user.id} estimate={fundingEstimate} />
+              </IssueRewardPanel>
             ) : null}
 
             <section className="flex flex-col gap-2 rounded-[20px] border border-zk-border bg-zk-surface px-4 py-3.5">
@@ -2027,6 +2033,12 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
                   </a>)}
                 </div> : null}
                 {canChooseRedesign && proposal.status === "proposed" ? <ChooseRedesignButton id={proposal.id} /> : null}
+                {/* Its page in the project's Design area (#9), which only the organisation's members may open. */}
+                {membership ? (
+                  <Link href={designPath(refOf(bug.project), proposal.id)} className="inline-block text-sm font-semibold text-zk-accent hover:underline">
+                    Open in Design →
+                  </Link>
+                ) : null}
               </article>
             ))}
           </div>
@@ -2249,6 +2261,7 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
               ideaHref={newIssueHref(refOf(bug.project), issueHref(bug))}
             />
           ) : null}
+
 
               {/* Who has the issue, while it is the latest thing (In progress); the timeline below keeps the award after that. */}
               {(hold?.status === "active" || hold?.status === "planning") && bug.status === "in_progress" ? <AwardBox hold={hold} agentPaused={Boolean(workingAgent?.pausedAt)} bugId={bug.id} isWatching={isWatchingIssue} isIssueOwner={bug.reporterId === user.id} /> : null}
@@ -2516,12 +2529,14 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
           {rewardRow ? (
             <IssueRewardPanel
               bugId={bug.id}
-              reward={Number(rewardRow.reward)}
+              reward={dollarsToZiks(Number(rewardRow.reward))}
               fixed={Boolean(rewardRow.rewardFixedAt)}
               estimates={rewardEstimates}
               viewerId={user.id}
               canEstimate={!bug.isDeleted && bug.status !== "closed"}
-            />
+            >
+              <FundIssueSection bugId={bug.id} userId={user.id} estimate={fundingEstimate} />
+            </IssueRewardPanel>
           ) : null}
 
           {/* People, compact: one row each, label on the left. */}

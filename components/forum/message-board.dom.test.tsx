@@ -74,4 +74,87 @@ describe("PublicMessageBoard", () => {
     expect(screen.getByRole("button", { name: /^Write$/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Preview$/i })).toBeInTheDocument();
   });
+
+  it("renders directly in detail view when initialView='detail' is provided", async () => {
+    render(<PublicMessageBoard initialView="detail" initialPostId="fm-1" />);
+
+    expect(screen.getByRole("button", { name: /Back to discussions/i })).toBeInTheDocument();
+    expect(
+      screen.getByText(/SEO title tag & meta description overhaul for landing page/i)
+    ).toBeInTheDocument();
+  });
+
+  it("renders with custom scope and organisation list", async () => {
+    const mockOrgs = [
+      {
+        id: "cyberdyne",
+        name: "Cyberdyne Systems",
+        slug: "cyberdyne",
+        projects: [{ id: "skynet", name: "Skynet Core", slug: "skynet" }],
+      },
+    ];
+
+    render(
+      <PublicMessageBoard
+        scope="org"
+        orgSlug="cyberdyne"
+        orgName="Cyberdyne Systems"
+        organisations={mockOrgs}
+      />
+    );
+
+    expect(screen.getAllByText(/Cyberdyne Systems/i).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("renders external projects and handles external project selection", async () => {
+    const mockExternal = [
+      {
+        id: "proj-ext",
+        name: "Security Mesh",
+        slug: "security-mesh",
+        organisationId: "shield-org",
+        organisationName: "Shield Corp",
+        organisationSlug: "shield-corp",
+      },
+    ];
+
+    render(<PublicMessageBoard externalProjects={mockExternal} />);
+
+    expect(screen.getByText("Security Mesh")).toBeInTheDocument();
+    expect(screen.getByText("Shield Corp")).toBeInTheDocument();
+  });
+
+  it("renders empty state when initialMessages is empty and allows starting a discussion", async () => {
+    const user = userEvent.setup();
+    render(<PublicMessageBoard initialMessages={[]} />);
+
+    expect(screen.getByText(/No discussions yet in/i)).toBeInTheDocument();
+    const startBtn = screen.getByRole("button", { name: /Start a discussion/i });
+    expect(startBtn).toBeInTheDocument();
+
+    await user.click(startBtn);
+    expect(screen.getByText(/Create New Forum Post/i)).toBeInTheDocument();
+  });
+
+  it("renders filtered empty state when search returns no results and resets filters", async () => {
+    const user = userEvent.setup();
+    render(<PublicMessageBoard />);
+
+    const searchInput = screen.getByPlaceholderText(/Search forum/i);
+    await user.type(searchInput, "nonexistent-query-xyz");
+
+    expect(screen.getByText(/No discussions match your filters/i)).toBeInTheDocument();
+    const resetBtn = screen.getByRole("button", { name: /Reset all filters/i });
+    expect(resetBtn).toBeInTheDocument();
+
+    await user.click(resetBtn);
+    expect(screen.queryByText(/No discussions match your filters/i)).not.toBeInTheDocument();
+  });
+
+  it("renders discussion not found state when initialView='detail' and post does not exist", () => {
+    render(<PublicMessageBoard initialView="detail" initialPostId="does-not-exist" initialMessages={[]} />);
+
+    expect(screen.getByText(/Discussion not found/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Return to discussions list/i })).toBeInTheDocument();
+  });
 });

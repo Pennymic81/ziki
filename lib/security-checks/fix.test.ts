@@ -16,10 +16,14 @@ const tx = {
   $executeRaw: vi.fn(),
   project: { findFirst: vi.fn() },
   securityCheck: { update: vi.fn() },
-  securityCheckResult: { findMany: vi.fn(), update: vi.fn(), updateManyAndReturn: vi.fn() },
+  securityCheckResult: { findMany: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
+  coinEntry: { aggregate: vi.fn(), createMany: vi.fn() },
   idea: { create: vi.fn() },
   securityFinding: { create: vi.fn() },
 };
+/** The report's results (what is being sent), and the ones still locked among them (what is paid for). */
+let resultRows: unknown[] = [];
+let lockedRows: unknown[] = [];
 const db = { $transaction: vi.fn((work: (client: typeof tx) => unknown) => work(tx)) };
 const send = (input = selection) => sendCheckFindings(client, input, db as never);
 
@@ -28,29 +32,50 @@ beforeEach(() => {
   tx.$queryRaw.mockResolvedValue([{ postedAt: new Date(), projectId: null }]);
   tx.$executeRaw.mockResolvedValue(1);
   tx.project.findFirst.mockResolvedValue({ slug: "web", organisation: { slug: "ziki" } });
-  tx.securityCheckResult.findMany.mockResolvedValue([{ id: "r1", severity: "high", unlockedAt: new Date(), finding: null }]);
-  tx.securityCheckResult.updateManyAndReturn.mockResolvedValue([]);
+  resultRows = [{ id: "r1", severity: "high", unlockedAt: new Date(), finding: null }];
+  lockedRows = [];
+  tx.securityCheckResult.findMany.mockImplementation(async (args: { where: { unlockedAt?: null } }) => (args.where.unlockedAt === null ? lockedRows : resultRows));
+  tx.securityCheckResult.updateMany.mockResolvedValue({ count: 0 });
+  // A wallet with plenty of Ziks, and a ledger that records what is written.
+  tx.coinEntry.aggregate.mockResolvedValue({ _sum: { amount: 100 } });
+  tx.coinEntry.createMany.mockImplementation(async ({ data }: { data: unknown[] }) => ({ count: data.length }));
   tx.idea.create.mockResolvedValue({ id: "i1" });
   tx.securityFinding.create.mockResolvedValue({ id: "f1" });
   vi.mocked(convertClientVettedIdea).mockResolvedValue({ issueNumber: 42 } as never);
 });
 
 describe("Fix on Ziki", () => {
-  it("totals only newly unlocked results in a mixed selection", async () => {
-    tx.securityCheckResult.findMany.mockResolvedValue([
+  it("charges Ziks for only the newly unlocked results in a mixed selection", async () => {
+    resultRows = [
       { id: "r1", severity: "high", unlockedAt: null, finding: null },
       { id: "r2", severity: "low", unlockedAt: new Date(), finding: null },
-    ]);
-    tx.securityCheckResult.updateManyAndReturn.mockResolvedValue([{ severity: "high", priceCoins: 7 }]);
+    ];
+    lockedRows = [{ id: "r1", severity: "high", priceCoins: 7 }];
+    tx.securityCheckResult.updateMany.mockResolvedValue({ count: 1 });
 
     await expect(send({ ...selection, resultIds: ["r1", "r2"] })).resolves.toMatchObject({
       ok: true, created: 2, coins: 7,
     });
-    expect(tx.securityCheckResult.updateManyAndReturn).toHaveBeenCalledWith({
-      where: { checkId: "c1", id: { in: ["r1", "r2"] }, unlockedAt: null },
+    expect(tx.securityCheckResult.updateMany).toHaveBeenCalledWith({
+      where: { id: { in: ["r1"] }, checkId: "c1", unlockedAt: null },
       data: { unlockedAt: expect.any(Date) },
-      select: { severity: true, priceCoins: true },
     });
+    const rows = tx.coinEntry.createMany.mock.calls[0][0].data;
+    expect(rows.map((r: { account: string; userId?: string; amount: number }) => [r.account, r.userId, r.amount])).toEqual([
+      ["wallet", "u1", -7],
+      ["revenue", undefined, 7],
+    ]);
+  });
+
+  it("sends nothing and charges nothing when the wallet can't cover the findings", async () => {
+    resultRows = [{ id: "r1", severity: "high", unlockedAt: null, finding: null }];
+    lockedRows = [{ id: "r1", severity: "high", priceCoins: 7 }];
+    tx.coinEntry.aggregate.mockResolvedValue({ _sum: { amount: 3 } });
+
+    await expect(send()).resolves.toMatchObject({ ok: false, error: expect.stringContaining("Ziks") });
+    expect(tx.securityCheckResult.updateMany).not.toHaveBeenCalled();
+    expect(tx.coinEntry.createMany).not.toHaveBeenCalled();
+    expect(tx.idea.create).not.toHaveBeenCalled();
   });
 
   it("does not load another person's check in the same workspace", async () => {
@@ -149,7 +174,7 @@ describe("Fix on Ziki", () => {
     expect(tx.securityCheck.update).toHaveBeenCalledWith({ where: { id: "c1" }, data: { projectId: "p1" } });
 
     tx.$queryRaw.mockResolvedValue([{ postedAt: new Date(), projectId: "p1" }]);
-    tx.securityCheckResult.findMany.mockResolvedValue([{ id: "r1", severity: "high", unlockedAt: new Date(), finding: { bug: { number: 42 } } }]);
+    resultRows = [{ id: "r1", severity: "high", unlockedAt: new Date(), finding: { bug: { number: 42 } } }];
     await expect(send()).resolves.toEqual({ ok: true, created: 0, reused: 1, coins: 0, issues: [{ resultId: "r1", number: 42, href: "/ziki/web/42" }] });
     expect(tx.idea.create).toHaveBeenCalledTimes(1);
     expect(tx.securityFinding.create).toHaveBeenCalledTimes(1);

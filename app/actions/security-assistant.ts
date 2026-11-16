@@ -17,7 +17,10 @@ import {
   askSecurityAssistant,
   type AssistantTurn,
 } from "@/lib/security-checks/assistant";
-import { loadSiteChat, saveSiteMessage, SITE_CHAT_MESSAGE_MAX, siteChatScan, siteContextNote } from "@/lib/security-checks/site-chat";
+import { loadSiteChat, saveSiteMessage, scansContextNote, SITE_CHAT_MESSAGE_MAX, siteChatScan, siteContextNote } from "@/lib/security-checks/site-chat";
+import { after } from "next/server";
+import { kickCheck } from "@/lib/security-checks/engine";
+import { prisma } from "@/lib/prisma";
 
 /**
  * Ziki's security chat, signed in (#security-checks, plan part C3). A plain
@@ -136,7 +139,8 @@ export async function talkToSecurityAssistant(history: AssistantTurn[]): Promise
   const limit = checkRateLimit(`security-assistant:${user.id}`, ASSISTANT_RATE_LIMIT);
   if (!limit.allowed) return { kind: "error", error: RATE_LIMIT_MESSAGE };
 
-  const answer = await askSecurityAssistant(turns);
+  // Follow-ups about their own scans ("what's happening with my site?"): what's known about them, read here.
+  const answer = await askSecurityAssistant(turns, await scansContextNote(access.organisationId, user.id));
   if (!answer) return { kind: "reply", reply: ASK_FOR_ADDRESS };
   if (answer.target) {
     const picked = parseSecurityTarget(answer.target);
@@ -144,19 +148,6 @@ export async function talkToSecurityAssistant(history: AssistantTurn[]): Promise
     if (picked.error === PRIVATE_TARGET_ERROR) return { kind: "reply", reply: PRIVATE_TARGET_ERROR };
   }
   return { kind: "reply", reply: answer.reply };
-}
-
-/** Add a site to the person's scans from outside the chat (the public page, signed in): scan, add, then back to Security. */
-export async function addSecurityAsset(link: string): Promise<ChatAnswer> {
-  const user = await requireUser();
-  const access = await currentOrganisationAccess(user.id, user.role);
-  if (!access.organisationId) return { kind: "error", error: NO_WORKSPACE };
-  if (!access.admin) return { kind: "error", error: OWNERS_ONLY_MESSAGE };
-  const parsed = parseSecurityTarget(typeof link === "string" ? link : "");
-  if (!parsed.ok) return { kind: "error", error: parsed.error };
-  const answer = await scanAndAdd(access.organisationId, user.id, parsed.target, "");
-  if (answer.kind !== "scan" || !answer.checkId) return answer;
-  return { kind: "go", reply: "", href: `/security?check=${encodeURIComponent(answer.checkId)}` };
 }
 
 /**
@@ -187,6 +178,9 @@ async function scanAndAdd(organisationId: string, userId: string, target: Parsed
   if (!addable) return { kind: "scan", reply: "", target: address, summary: null, note: result.ok ? null : result.reason, checkId: null };
   const added = await addTargetAndCheck(organisationId, userId, target);
   if ("refused" in added) return { kind: "reply", reply: refusedMessage(added.refused, target.value) };
+  // Start it as soon as this answers. Waiting for the one-minute sweep left a new scan on "Waiting to start" for minutes
+  // (the sweep can be busy for a long time), and once for ten (15 Nov test); kickCheck never throws, and the sweep still catches a miss.
+  after(() => kickCheck(prisma, added.checkId));
   if (summary) await saveQuickScan(added.targetId, summary);
   // The conversation that led to this scan becomes the start of the site's saved chat,
   // so "See result" later carries on from it (14 Nov call).
@@ -195,13 +189,16 @@ async function scanAndAdd(organisationId: string, userId: string, target: Parsed
   return { kind: "scan", reply, target: address, summary, note: result.ok ? null : result.reason, checkId: added.checkId };
 }
 
-/** Save the chat that led to a scan, and the reply with what the quick scan found, as the start of that site's chat. */
+/**
+ * Save the chat that led to a scan, and the reply with what the quick scan found, as the start of that site's chat.
+ * The agents' report later replaces the quick scan's numbers, so the saved line says when it was true.
+ */
 async function keepConversation(organisationId: string, userId: string, targetId: string, conversation: AssistantTurn[], reply: string, summary: PreviewSummary | null) {
   if (!conversation.length) return;
   const counts = summary
     ? (["critical", "high", "medium", "low"] as const).filter((s) => summary.counts[s]).map((s) => `${summary.counts[s]} ${s}`).join(", ")
     : "";
-  const found = summary ? (summary.total ? ` The quick scan found ${summary.total} ${summary.total === 1 ? "problem" : "problems"} (${counts}).` : " The quick scan found nothing.") : "";
+  const found = summary ? (summary.total ? ` When you added it, the quick scan found ${summary.total} ${summary.total === 1 ? "problem" : "problems"} (${counts}).` : " When you added it, the quick scan found nothing.") : "";
   for (const turn of conversation) await saveSiteMessage(organisationId, userId, targetId, turn.role, turn.text);
   const said = `${reply}${found}`.trim();
   if (said) await saveSiteMessage(organisationId, userId, targetId, "assistant", said);

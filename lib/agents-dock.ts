@@ -13,8 +13,8 @@ export const AGENTS_DOCK_HEIGHT = 76;
  * here. The pages, matched on whole path segments (a trailing slash is fine):
  *
  * - the organisation's `/home`, `/feed`, `/activity` and `/inbox` (and below it);
- * - a project's landing page `/<org>/<project>`, its `/ideas` and `/issues`
- *   pages (and below them), an issue `/<org>/<project>/<number>`,
+ * - a project's landing page `/<org>/<project>`, its `/ideas`, `/issues` and
+ *   `/clusters` pages (and below them), an issue `/<org>/<project>/<number>`,
  *   `/<org>/<project>/workstream` and `/<org>/<project>/work`.
  *
  * An organisation's slug is any first segment that isn't a reserved top-level
@@ -33,7 +33,7 @@ export function dockVisibleOn(pathname: string | null | undefined, agentCount: n
   if (isReservedProjectSlug(first) || segments.length < 2 || isProjectFirstPath(path)) return false;
   // A project's pages, after /<org>/<project>.
   const [page, ...below] = segments.slice(2);
-  if (!page || page === "ideas" || page === "issues") return true;
+  if (!page || page === "ideas" || page === "issues" || page === "clusters") return true;
   return below.length === 0 && (page === "workstream" || page === "work" || /^\d+$/.test(page));
 }
 

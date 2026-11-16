@@ -186,6 +186,7 @@ const THEME_ICONS: Record<(typeof THEMES)[number], string> = {
  * Compact theme selector for the account menu and mobile menu (#659): one row,
  * "Theme" and three small icon buttons, each named for screen readers.
  */
+
 export function AccountThemeSelector() {
   const [theme, setTheme, pending] = useTheme();
 

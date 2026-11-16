@@ -31,7 +31,9 @@ const nextConfig: NextConfig = {
   outputFileTracingIncludes: {
     "/llms.txt": ["./docs/ziki-for-agents.md"],
     // The security report PDF embeds its own font (components/security-checks/report-pdf.tsx).
-    "/security/checks/[id]/report.pdf": ["./assets/fonts/**"],
+    // pdfkit loads its built-in font files (Helvetica.cjs and the like) by a path the tracer can't follow, so
+    // the production image left them out and every download failed with "Cannot find module .../standard-fonts/Helvetica.cjs".
+    "/security/checks/[id]/report.pdf": ["./assets/fonts/**", "./node_modules/.pnpm/pdfkit@*/node_modules/pdfkit/js/**"],
   },
   async headers() {
     // #222: the app previously sent no security headers at all, which left

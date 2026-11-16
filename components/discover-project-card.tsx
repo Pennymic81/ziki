@@ -65,15 +65,26 @@ export function DiscoverProjectCard({ project }: { project: DiscoverableProject 
                 </Link>
               </h3>
             </div>
-            {project.isOpenForContributors ? (
-              <Badge className="shrink-0 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-[11px] font-semibold text-emerald-400">
-                Open for Contributors
+            <div className="flex flex-wrap items-center justify-end gap-1.5">
+              <Badge
+                className={
+                  project.acceptsGuestIdeas
+                    ? "shrink-0 rounded-full border border-sky-500/30 bg-sky-500/10 text-[11px] font-semibold text-sky-400"
+                    : "shrink-0 rounded-full border border-zk-border bg-zk-chip text-[11px] font-medium text-zk-muted"
+                }
+              >
+                {project.acceptsGuestIdeas ? "Accepts feedback" : "Feedback closed"}
               </Badge>
-            ) : (
-              <Badge className="shrink-0 rounded-full border border-zk-border bg-zk-chip text-[11px] font-medium text-zk-text2">
-                Not open for now
-              </Badge>
-            )}
+              {project.isOpenForContributors ? (
+                <Badge className="shrink-0 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-[11px] font-semibold text-emerald-400">
+                  Open for Contributors
+                </Badge>
+              ) : (
+                <Badge className="shrink-0 rounded-full border border-zk-border bg-zk-chip text-[11px] font-medium text-zk-text2">
+                  Not open for now
+                </Badge>
+              )}
+            </div>
           </div>
 
           <p className="line-clamp-2 text-sm text-zk-text2">

@@ -14,7 +14,6 @@ import { newIssuePath, type ProjectRef } from "@/lib/project-paths";
 import { SeverityChip } from "@/components/security-finding-panel";
 import { AgentClearanceToggle } from "@/components/security-finding-controls";
 import { PipelineSteps } from "@/components/pipeline-steps";
-import { SecuritySettingsLink } from "@/components/security/security-settings-link";
 import {
   filterSecurityFindingsByStage,
   parseSecurityStageFilter,
@@ -122,20 +121,23 @@ export default async function SecurityPage(props: {
     );
   }
   if (!showFindings && !access.admin) {
-    // Scans live in a workspace the person owns or runs. If the current one isn't theirs,
-    // open one that is, keeping the scanned site.
-    const own = await prisma.membership.findFirst({
-      where: { userId: user.id, role: { in: ["owner", "admin"] }, organisation: { archivedAt: null } },
-      orderBy: { createdAt: "asc" },
-      select: { organisationId: true },
-    });
-    if (own && own.organisationId !== access.organisationId) {
-      redirect(`/organisations/open?organisation=${encodeURIComponent(own.organisationId)}&next=${encodeURIComponent(back)}`);
+    // Arriving with a scanned site (from the public page): scans live in a workspace the person owns or
+    // runs, so if the current one isn't theirs, open one that is, keeping the scanned site.
+    if (brought) {
+      const own = await prisma.membership.findFirst({
+        where: { userId: user.id, role: { in: ["owner", "admin"] }, organisation: { archivedAt: null } },
+        orderBy: { createdAt: "asc" },
+        select: { organisationId: true },
+      });
+      if (own && own.organisationId !== access.organisationId) {
+        redirect(`/organisations/open?organisation=${encodeURIComponent(own.organisationId)}&next=${encodeURIComponent(back)}`);
+      }
+      // Owns none: straight to creating one; they come back here afterwards and the scan starts.
+      if (!own) redirect(`/organisations?next=${encodeURIComponent(back)}`);
     }
-    // Owns none and arrived with a scanned site (from the public page): straight to creating one;
-    // they come back here afterwards and the scan starts.
-    if (!own && brought) redirect(`/organisations?next=${encodeURIComponent(back)}`);
-    // A plain member of this workspace just sees their own work, as before.
+    // Otherwise a plain member of this workspace stays in it and sees their own work. Without a scanned
+    // site they are never moved to another workspace (15 Nov call): that other workspace is one switch away,
+    // and Your work says so.
     if (access.organisationId) redirect("/security/work");
   }
   if (!access.organisationId) {
@@ -144,7 +146,6 @@ export default async function SecurityPage(props: {
         <OrgPageHeader heading="h1" title="Security" actions={
           <div className="flex items-center gap-2">
             <Link href="/security/activity" className="text-sm font-semibold text-zk-accent hover:underline">Activity</Link>
-            <SecuritySettingsLink />
           </div>
         }>Report and track security findings.</OrgPageHeader>
         {/* No workspace of their own: scans live in one, so make it first, then come straight back with the site. */}
@@ -216,7 +217,6 @@ export default async function SecurityPage(props: {
       <OrgPageHeader heading="h1" title="Findings" actions={
         <div className="flex flex-wrap items-center gap-2">
           <Link href="/security/activity" className="text-sm font-semibold text-zk-accent hover:underline">Activity</Link>
-          <SecuritySettingsLink />
           <ReportButton projects={dashboard.projects} />
         </div>
       }>

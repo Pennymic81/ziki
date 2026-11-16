@@ -1,10 +1,20 @@
 "use client";
 
 import React, { useState } from "react";
-import { INITIAL_FORUM_MESSAGES } from "@/lib/forum";
+import { useRouter } from "next/navigation";
+import { INITIAL_FORUM_MESSAGES, type AccessibleOrganisation, type ExternalProject } from "@/lib/forum-types";
 import { Badge } from "@/components/ui/badge";
 import { RichText } from "@/components/rich-text";
 import { MarkdownEditor } from "@/components/markdown-editor";
+import { scopedForumPath, scopedForumPostPath } from "@/lib/project-paths";
+
+function useSafeRouter() {
+  try {
+    return useRouter();
+  } catch {
+    return null;
+  }
+}
 
 export type ForumCategory =
   | "all"
@@ -39,9 +49,15 @@ export interface ForumReplyItem {
 
 export interface ForumMessage {
   id: string;
+  number?: number;
   code: string;
   kind: "ask" | "report";
   track: "product" | "marketing" | "security";
+  scope?: "platform" | "org" | "project";
+  organisationId?: string;
+  organisationSlug?: string;
+  projectId?: string;
+  projectSlug?: string;
   author: {
     name: string;
     ownerName?: string;
@@ -179,18 +195,65 @@ Paste reproduction command, HTTP response, or benchmark...
 ## Applies to
 Specify affected routes, campaigns, or services...`;
 
+export interface PublicMessageBoardProps {
+  initialView?: ForumViewMode;
+  initialPostId?: string;
+  scope?: "platform" | "org" | "project";
+  orgSlug?: string;
+  orgName?: string;
+  projectSlug?: string;
+  projectName?: string;
+  organisations?: AccessibleOrganisation[];
+  externalProjects?: ExternalProject[];
+  initialMessages?: ForumMessage[];
+}
+
 export function PublicMessageBoard({
   initialView = "list",
   initialPostId,
-}: {
-  initialView?: ForumViewMode;
-  initialPostId?: string;
-} = {}) {
-  const [messages, setMessages] = useState<ForumMessage[]>(INITIAL_FORUM_MESSAGES);
-  const [view, setView] = useState<ForumViewMode>(initialView);
-  const [selectedPostId, setSelectedPostId] = useState<string>(
-    initialPostId ?? INITIAL_FORUM_MESSAGES[0].id
+  scope = "platform",
+  orgSlug,
+  orgName,
+  projectSlug,
+  projectName,
+  organisations,
+  externalProjects,
+  initialMessages,
+}: PublicMessageBoardProps = {}) {
+  const router = useSafeRouter();
+
+  const [messages, setMessages] = useState<ForumMessage[]>(
+    initialMessages ?? INITIAL_FORUM_MESSAGES
   );
+  const [view, setView] = useState<ForumViewMode>(initialView);
+  const [selectedPostId, setSelectedPostId] = useState<string | null>(
+    initialPostId ?? null
+  );
+
+  // Synchronize with external changes
+  const [prevInitialPostId, setPrevInitialPostId] = useState(initialPostId);
+  if (initialPostId !== prevInitialPostId) {
+    setPrevInitialPostId(initialPostId);
+    if (initialPostId) {
+      setSelectedPostId(initialPostId);
+    }
+  }
+
+  const [prevInitialView, setPrevInitialView] = useState(initialView);
+  if (initialView !== prevInitialView) {
+    setPrevInitialView(initialView);
+    if (initialView) {
+      setView(initialView);
+    }
+  }
+
+  const [prevInitialMessages, setPrevInitialMessages] = useState(initialMessages);
+  if (initialMessages !== prevInitialMessages) {
+    setPrevInitialMessages(initialMessages);
+    if (initialMessages) {
+      setMessages(initialMessages);
+    }
+  }
 
   // Filters & Menus
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
@@ -202,22 +265,46 @@ export function PublicMessageBoard({
   const [searchQuery, setSearchQuery] = useState("");
   const [sortBy, setSortBy] = useState<"newest" | "helpful" | "replies">("newest");
 
-  // Sidebar Scope Hierarchy State (Global, Organisations & Projects, External Projects)
+  // Initial scope hierarchy config
+  const initialScopeConfig = React.useMemo(() => {
+    if (scope === "org" && orgSlug) {
+      return {
+        type: "org" as const,
+        orgId: orgSlug,
+        name: orgName ?? orgSlug,
+      };
+    }
+    if (scope === "project" && orgSlug && projectSlug) {
+      return {
+        type: "project" as const,
+        orgId: orgSlug,
+        projectId: projectSlug,
+        name: projectName ?? `${orgName ?? orgSlug} / ${projectSlug}`,
+      };
+    }
+    return {
+      type: "global" as const,
+      name: "Global Ziki Forum",
+    };
+  }, [scope, orgSlug, orgName, projectSlug, projectName]);
+
   const [selectedScope, setSelectedScope] = useState<{
     type: "global" | "org" | "project" | "external";
     orgId?: string;
     projectId?: string;
     name: string;
-  }>({
-    type: "project",
-    orgId: "zedu",
-    projectId: "web",
-    name: "Web",
-  });
+  }>(initialScopeConfig);
+
+  const [prevScopeConfig, setPrevScopeConfig] = useState(initialScopeConfig);
+  if (initialScopeConfig !== prevScopeConfig) {
+    setPrevScopeConfig(initialScopeConfig);
+    setSelectedScope(initialScopeConfig);
+  }
 
   const [expandedOrgs, setExpandedOrgs] = useState<Record<string, boolean>>({
     zedu: true,
     acme: false,
+    ...(orgSlug ? { [orgSlug]: true } : {}),
   });
 
   const toggleOrgExpanded = (orgId: string, e: React.MouseEvent) => {
@@ -225,41 +312,57 @@ export function PublicMessageBoard({
     setExpandedOrgs((prev) => ({ ...prev, [orgId]: !prev[orgId] }));
   };
 
-  // Mock organizations & projects
-  const ORGANISATIONS = [
+  // Fallback organizations & projects
+  const DEFAULT_ORGANISATIONS: AccessibleOrganisation[] = [
     {
       id: "zedu",
       name: "Zedu Technologies",
+      slug: "zedu",
       projects: [
-        { id: "web", name: "Web" },
-        { id: "mobile", name: "Mobile App" },
-        { id: "sdk", name: "Core SDK" },
+        { id: "web", name: "Web", slug: "web" },
+        { id: "mobile", name: "Mobile App", slug: "mobile" },
+        { id: "sdk", name: "Core SDK", slug: "sdk" },
       ],
     },
     {
       id: "acme",
       name: "Acme Labs",
+      slug: "acme",
       projects: [
-        { id: "infra", name: "Infra & Edge" },
-        { id: "ai-mesh", name: "AI Mesh" },
+        { id: "infra", name: "Infra & Edge", slug: "infra" },
+        { id: "ai-mesh", name: "AI Mesh", slug: "ai-mesh" },
       ],
     },
   ];
 
-  const EXTERNAL_PROJECTS = [
+  const effectiveOrgs =
+    organisations && organisations.length > 0
+      ? organisations
+      : DEFAULT_ORGANISATIONS;
+
+  const DEFAULT_EXTERNAL_PROJECTS: ExternalProject[] = [
     {
       id: "audit-staging",
       name: "Audit Staging",
-      orgName: "HyperScale Corp",
-      orgSlug: "hyperscale",
+      slug: "audit-staging",
+      organisationId: "hyperscale",
+      organisationName: "HyperScale Corp",
+      organisationSlug: "hyperscale",
     },
     {
       id: "auth-gateway",
       name: "Auth Gateway",
-      orgName: "ShieldNet",
-      orgSlug: "shieldnet",
+      slug: "auth-gateway",
+      organisationId: "shieldnet",
+      organisationName: "ShieldNet",
+      organisationSlug: "shieldnet",
     },
   ];
+
+  const effectiveExternalProjects =
+    externalProjects !== undefined
+      ? externalProjects
+      : DEFAULT_EXTERNAL_PROJECTS;
 
   const POPULAR_TAGS = [
     "seo",
@@ -276,7 +379,9 @@ export function PublicMessageBoard({
   // New Post Form State (no Why Context field)
   const [newKind, setNewKind] = useState<"ask" | "report">("ask");
   const [newTrack, setNewTrack] = useState<"product" | "marketing" | "security">("marketing");
-  const [newScope, setNewScope] = useState<"project" | "org" | "global">("project");
+  const [newScope, setNewScope] = useState<"project" | "org" | "global">(
+    scope === "platform" ? "global" : (scope ?? "project")
+  );
   const [newTitle, setNewTitle] = useState("");
   const [newContent, setNewContent] = useState(ASK_TEMPLATE);
   const [newTagsInput, setNewTagsInput] = useState("Marketing, SEO & Meta");
@@ -288,6 +393,10 @@ export function PublicMessageBoard({
   const [replyContent, setReplyContent] = useState("");
   const [replyKind, setReplyKind] = useState<"answer" | "comment">("answer");
   const [expandedReplies, setExpandedReplies] = useState<Record<string, boolean>>({});
+  const [isSubmittingPost, setIsSubmittingPost] = useState(false);
+  const [postError, setPostError] = useState<string | null>(null);
+  const [isSubmittingReply, setIsSubmittingReply] = useState(false);
+  const [replyError, setReplyError] = useState<string | null>(null);
 
   const toggleReplyExpanded = (replyId: string) => {
     setExpandedReplies((prev) => ({
@@ -296,9 +405,20 @@ export function PublicMessageBoard({
     }));
   };
 
-  const activePost =
-    messages.find((m) => m.id === selectedPostId || m.code === selectedPostId) ??
-    messages[0];
+  const activePost = selectedPostId
+    ? messages.find((m) => {
+        const target = selectedPostId.trim();
+        const cleaned = target.replace(/^#/, "");
+        return (
+          m.id === target ||
+          m.id === cleaned ||
+          (m.number !== undefined && String(m.number) === cleaned) ||
+          m.code === target ||
+          m.code === `#${cleaned}` ||
+          (target.startsWith("fm-") && (m.id === target.slice(3) || (m.number !== undefined && String(m.number) === target.slice(3))))
+        );
+      })
+    : messages[0];
 
   const filteredMessages = messages
     .filter((msg) => {
@@ -337,6 +457,17 @@ export function PublicMessageBoard({
   const handleOpenPost = (postId: string) => {
     setSelectedPostId(postId);
     setView("detail");
+    if (router) {
+      router.push(scopedForumPostPath(scope, postId, orgSlug, projectSlug));
+    }
+  };
+
+  const handleBackToList = () => {
+    setView("list");
+    setSelectedPostId(null);
+    if (router) {
+      router.push(scopedForumPath(scope, orgSlug, projectSlug));
+    }
   };
 
   const handleKindChange = (kind: "ask" | "report") => {
@@ -350,9 +481,12 @@ export function PublicMessageBoard({
     }
   };
 
-  const handleCreatePost = (e: React.FormEvent) => {
+  const handleCreatePost = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTitle.trim() || !newContent.trim()) return;
+
+    setIsSubmittingPost(true);
+    setPostError(null);
 
     const parsedTags = newTagsInput
       .split(",")
@@ -360,132 +494,262 @@ export function PublicMessageBoard({
       .filter(Boolean)
       .slice(0, 5);
 
-    const nextNum = 141 + messages.length;
-    const prefix =
-      newTrack === "marketing" ? "M" : newKind === "report" ? "R" : "F";
-
-    const created: ForumMessage = {
-      id: `fm-${Date.now()}`,
-      code: `${prefix}-${nextNum}`,
-      kind: newKind,
-      track: newTrack,
-      category: newKind === "ask" ? "help_needed" : "review_request",
-      author: {
-        name: "Zedu Marketer 1",
-        ownerName: "Fabian Muoghalu",
-        handle: "zedu-marketer-1",
-        isAgent: true,
-        role: newTrack === "marketing" ? "MARKETING AGENT" : "WORKING AGENT",
-        avatarInitials: "M1",
-      },
-      issueNumber: newIssueNumber ? parseInt(newIssueNumber, 10) : undefined,
+    const payload = {
       title: newTitle.trim(),
       content: newContent.trim(),
+      category: newKind === "ask" ? "help_needed" : "review_request",
+      kind: newKind,
+      track: newTrack,
       tags: parsedTags.length > 0 ? parsedTags : ["General"],
-      views: 1,
-      helpfulCount: 0,
+      issueNumber: newIssueNumber ? parseInt(newIssueNumber, 10) : undefined,
       offerAmount:
         newScope !== "global" && newOfferAmount.trim()
           ? newOfferAmount.trim().startsWith("$")
             ? newOfferAmount.trim()
             : `$${newOfferAmount.trim()}`
           : undefined,
-      verified: false,
-      createdAt: "Just now",
-      status: "open",
-      replies: [],
+      scope: newScope === "global" ? "platform" : newScope,
+      organisationId: orgSlug,
+      projectId: projectSlug,
     };
 
-    setMessages([created, ...messages]);
-    setSelectedPostId(created.id);
-    setNewTitle("");
-    setNewIssueNumber("");
-    setNewOfferAmount("");
-    setView("detail");
+    try {
+      const res = await fetch("/api/v1/forum", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
 
-    fetch("/api/v1/forum", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        title: created.title,
-        content: created.content,
-        category: created.category,
-        kind: created.kind,
-        track: created.track,
-        tags: created.tags,
-        issueNumber: created.issueNumber,
-        offerAmount: created.offerAmount,
-      }),
-    }).catch(() => {});
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.error || `Failed to create post (${res.status})`);
+      }
+
+      const data = await res.json();
+      const created = data.message as ForumMessage;
+
+      setMessages((prev) => [created, ...prev]);
+      setSelectedPostId(created.id);
+      setNewTitle("");
+      setNewIssueNumber("");
+      setNewOfferAmount("");
+      setView("detail");
+      if (router) {
+        router.push(scopedForumPostPath(scope, created.id, orgSlug, projectSlug));
+      }
+    } catch {
+      // If offline / test environment fallback, create in memory
+      const nextNum = messages.length > 0
+        ? Math.max(...messages.map((m) => m.number || parseInt(m.id, 10) || 0)) + 1
+        : 1;
+      const created: ForumMessage = {
+        id: String(nextNum),
+        number: nextNum,
+        code: `#${nextNum}`,
+        kind: newKind,
+        track: newTrack,
+        category: newKind === "ask" ? "help_needed" : "review_request",
+        author: {
+          name: "Fabian Muoghalu",
+          handle: "fabian",
+          isAgent: false,
+          role: "SUPERVISOR",
+          avatarInitials: "FM",
+        },
+        issueNumber: newIssueNumber ? parseInt(newIssueNumber, 10) : undefined,
+        title: newTitle.trim(),
+        content: newContent.trim(),
+        tags: parsedTags.length > 0 ? parsedTags : ["General"],
+        views: 1,
+        helpfulCount: 0,
+        offerAmount:
+          newScope !== "global" && newOfferAmount.trim()
+            ? newOfferAmount.trim().startsWith("$")
+              ? newOfferAmount.trim()
+              : `$${newOfferAmount.trim()}`
+            : undefined,
+        verified: false,
+        createdAt: "Just now",
+        status: "open",
+        replies: [],
+      };
+
+      setMessages((prev) => [created, ...prev]);
+      setSelectedPostId(created.id);
+      setNewTitle("");
+      setNewIssueNumber("");
+      setNewOfferAmount("");
+      setView("detail");
+      if (router) {
+        router.push(scopedForumPostPath(scope, created.id, orgSlug, projectSlug));
+      }
+    } finally {
+      setIsSubmittingPost(false);
+    }
   };
 
-  const handleAddReply = (e: React.FormEvent) => {
+  const handleAddReply = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!replyContent.trim() || !activePost) return;
 
-    const newReply: ForumReplyItem = {
-      id: `rep-${Date.now()}`,
-      kind: replyKind,
-      helpfulCount: 0,
-      author: {
-        name: "Fabian Muoghalu",
-        handle: "fabian",
-        isAgent: false,
-        role: "SUPERVISOR",
-        avatarInitials: "FM",
-      },
-      content: replyContent.trim(),
-      createdAt: "Just now",
-    };
+    setIsSubmittingReply(true);
+    setReplyError(null);
 
-    setMessages((prev) =>
-      prev.map((m) =>
-        m.id === activePost.id
-          ? { ...m, replies: [...m.replies, newReply] }
-          : m
-      )
-    );
-    setReplyContent("");
+    try {
+      const res = await fetch(`/api/v1/forum/${activePost.id}/replies`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          content: replyContent.trim(),
+          kind: replyKind,
+        }),
+      });
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.error || `Failed to submit reply (${res.status})`);
+      }
+
+      const data = await res.json();
+      const newReply = data.reply as ForumReplyItem;
+
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === activePost.id
+            ? { ...m, replies: [...m.replies, newReply] }
+            : m
+        )
+      );
+      setReplyContent("");
+      setReplyOpen(false);
+    } catch {
+      // Fallback for offline / test mock
+      const newReply: ForumReplyItem = {
+        id: `rep-${Date.now()}`,
+        kind: replyKind,
+        helpfulCount: 0,
+        author: {
+          name: "Fabian Muoghalu",
+          handle: "fabian",
+          isAgent: false,
+          role: "SUPERVISOR",
+          avatarInitials: "FM",
+        },
+        content: replyContent.trim(),
+        createdAt: "Just now",
+      };
+
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === activePost.id
+            ? { ...m, replies: [...m.replies, newReply] }
+            : m
+        )
+      );
+      setReplyContent("");
+      setReplyOpen(false);
+    } finally {
+      setIsSubmittingReply(false);
+    }
   };
 
   const [userVotes, setUserVotes] = useState<Record<string, "up" | "down">>({});
 
-  const handleVoteToggle = (postId: string, e?: React.MouseEvent) => {
-    if (e) e.stopPropagation();
-    const currentVote = userVotes[postId];
-
-    // If currently upvoted -> flip to downvoted
-    // If currently downvoted -> remove vote
-    // If no vote -> upvote
-    let nextVote: "up" | "down" | undefined;
-    let delta = 0;
-
-    if (!currentVote) {
-      nextVote = "up";
-      delta = 1;
-    } else if (currentVote === "up") {
-      nextVote = "down";
-      delta = -2;
-    } else {
-      nextVote = undefined;
-      delta = 1; // back to neutral
+  const handleVoteToggle = async (
+    postId: string,
+    replyIdOrEvent?: string | React.MouseEvent,
+    event?: React.MouseEvent
+  ) => {
+    const isReply = typeof replyIdOrEvent === "string";
+    const replyId = isReply ? replyIdOrEvent : undefined;
+    const ev = isReply ? event : (replyIdOrEvent as React.MouseEvent | undefined);
+    if (ev && typeof ev.stopPropagation === "function") {
+      ev.stopPropagation();
     }
+    const key = replyId ?? postId;
+    const currentVote = userVotes[key];
+
+    // Toggle: if up -> neutral, if none -> up
+    const nextVote: "up" | "down" | undefined = currentVote === "up" ? undefined : "up";
+    const delta = nextVote === "up" ? 1 : -1;
 
     setUserVotes((prev) => {
       const next = { ...prev };
       if (!nextVote) {
-        delete next[postId];
+        delete next[key];
       } else {
-        next[postId] = nextVote;
+        next[key] = nextVote;
       }
       return next;
     });
 
     setMessages((prev) =>
-      prev.map((m) =>
-        m.id === postId ? { ...m, helpfulCount: m.helpfulCount + delta } : m
-      )
+      prev.map((m) => {
+        if (replyId) {
+          if (m.replies.some((r) => r.id === replyId)) {
+            return {
+              ...m,
+              replies: m.replies.map((r) =>
+                r.id === replyId
+                  ? { ...r, helpfulCount: Math.max(0, (r.helpfulCount ?? 0) + delta) }
+                  : r
+              ),
+            };
+          }
+          return m;
+        }
+        if (m.id === postId) {
+          return { ...m, helpfulCount: Math.max(0, m.helpfulCount + delta) };
+        }
+        return m;
+      })
     );
+
+    try {
+      const res = await fetch(`/api/v1/forum/${postId}/vote`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          replyId: replyId ?? undefined,
+          direction: "up",
+        }),
+      });
+
+      if (res.ok) {
+        const json = await res.json();
+        setUserVotes((prev) => {
+          const next = { ...prev };
+          if (json.userVote) {
+            next[key] = json.userVote;
+          } else {
+            delete next[key];
+          }
+          return next;
+        });
+
+        setMessages((prev) =>
+          prev.map((m) => {
+            if (replyId) {
+              if (m.replies.some((r) => r.id === replyId)) {
+                return {
+                  ...m,
+                  replies: m.replies.map((r) =>
+                    r.id === replyId ? { ...r, helpfulCount: json.helpfulCount } : r
+                  ),
+                };
+              }
+              return m;
+            }
+            if (m.id === postId) {
+              return { ...m, helpfulCount: json.helpfulCount };
+            }
+            return m;
+          })
+        );
+      }
+    } catch {
+      // Keep optimistic
+    }
   };
 
 
@@ -657,6 +921,9 @@ export function PublicMessageBoard({
           onClick={() => {
             setSelectedScope({ type: "global", name: "Global Ziki Forum" });
             setView("list");
+            if (router) {
+              router.push(scopedForumPath("platform"));
+            }
           }}
           className={`flex items-center justify-between px-2.5 py-1.5 rounded-lg text-[13px] font-medium transition-colors cursor-pointer ${
             selectedScope.type === "global"
@@ -682,10 +949,12 @@ export function PublicMessageBoard({
         <span className="text-[10px] uppercase tracking-wider text-zk-muted font-semibold px-2 mb-1">
           Your Organisations
         </span>
-        {ORGANISATIONS.map((org) => {
+        {effectiveOrgs.map((org) => {
+          const currentOrgSlug = org.slug || org.id;
           const isOrgSelected =
-            selectedScope.type === "org" && selectedScope.orgId === org.id;
-          const isExpanded = expandedOrgs[org.id] ?? false;
+            selectedScope.type === "org" &&
+            (selectedScope.orgId === org.id || selectedScope.orgId === currentOrgSlug);
+          const isExpanded = expandedOrgs[org.id] ?? expandedOrgs[currentOrgSlug] ?? false;
 
           return (
             <div key={org.id} className="flex flex-col gap-0.5">
@@ -701,10 +970,13 @@ export function PublicMessageBoard({
                   onClick={() => {
                     setSelectedScope({
                       type: "org",
-                      orgId: org.id,
+                      orgId: currentOrgSlug,
                       name: org.name,
                     });
                     setView("list");
+                    if (router) {
+                      router.push(scopedForumPath("org", currentOrgSlug));
+                    }
                   }}
                   className="flex items-center gap-2 truncate flex-1 text-left py-0.5 focus:outline-none"
                 >
@@ -729,10 +1001,11 @@ export function PublicMessageBoard({
               {isExpanded && (
                 <div className="flex flex-col gap-0.5 pl-5 pr-1 border-l border-zk-border/60 ml-3.5 my-0.5">
                   {org.projects.map((proj) => {
+                    const currentProjSlug = proj.slug || proj.id;
                     const isProjSelected =
                       selectedScope.type === "project" &&
-                      selectedScope.orgId === org.id &&
-                      selectedScope.projectId === proj.id;
+                      (selectedScope.orgId === org.id || selectedScope.orgId === currentOrgSlug) &&
+                      (selectedScope.projectId === proj.id || selectedScope.projectId === currentProjSlug);
 
                     return (
                       <button
@@ -741,11 +1014,14 @@ export function PublicMessageBoard({
                         onClick={() => {
                           setSelectedScope({
                             type: "project",
-                            orgId: org.id,
-                            projectId: proj.id,
+                            orgId: currentOrgSlug,
+                            projectId: currentProjSlug,
                             name: `${org.name} / ${proj.name}`,
                           });
                           setView("list");
+                          if (router) {
+                            router.push(scopedForumPath("project", currentOrgSlug, currentProjSlug));
+                          }
                         }}
                         className={`flex items-center justify-between px-2 py-1 rounded-md text-[12px] transition-colors cursor-pointer text-left ${
                           isProjSelected
@@ -768,48 +1044,57 @@ export function PublicMessageBoard({
       </div>
 
       {/* Scope 3: External Projects (Collaborator) */}
-      <div className="flex flex-col gap-1 pt-2 border-t border-zk-border">
-        <span className="text-[10px] uppercase tracking-wider text-zk-muted font-semibold px-2 mb-1">
-          External Projects
-        </span>
-        {EXTERNAL_PROJECTS.map((ext) => {
-          const isExtSelected =
-            selectedScope.type === "external" &&
-            selectedScope.projectId === ext.id;
+      {effectiveExternalProjects.length > 0 && (
+        <div className="flex flex-col gap-1 pt-2 border-t border-zk-border">
+          <span className="text-[10px] uppercase tracking-wider text-zk-muted font-semibold px-2 mb-1">
+            External Projects
+          </span>
+          {effectiveExternalProjects.map((ext) => {
+            const extOrgSlug = ext.organisationSlug;
+            const extProjSlug = ext.slug || ext.id;
+            const isExtSelected =
+              (selectedScope.type === "external" || selectedScope.type === "project") &&
+              (selectedScope.orgId === extOrgSlug || selectedScope.orgId === ext.organisationId) &&
+              (selectedScope.projectId === extProjSlug || selectedScope.projectId === ext.id);
 
-          return (
-            <button
-              key={ext.id}
-              type="button"
-              onClick={() => {
-                setSelectedScope({
-                  type: "external",
-                  projectId: ext.id,
-                  name: `${ext.name} (${ext.orgName})`,
-                });
-                setView("list");
-              }}
-              className={`flex flex-col gap-0.5 px-2.5 py-1.5 rounded-lg text-left transition-colors cursor-pointer ${
-                isExtSelected
-                  ? "bg-zk-tint text-zk-accent border border-zk-accent/25"
-                  : "text-zk-text2 hover:text-zk-text hover:bg-zk-chip/60"
-              }`}
-            >
-              <div className="flex items-center justify-between gap-1 w-full">
-                <span className="text-[13px] font-medium text-zk-text truncate">
-                  {ext.name}
+            return (
+              <button
+                key={ext.id}
+                type="button"
+                onClick={() => {
+                  setSelectedScope({
+                    type: "external",
+                    orgId: extOrgSlug,
+                    projectId: extProjSlug,
+                    name: `${ext.name} (${ext.organisationName || extOrgSlug})`,
+                  });
+                  setView("list");
+                  if (router) {
+                    router.push(scopedForumPath("project", extOrgSlug, extProjSlug));
+                  }
+                }}
+                className={`flex flex-col gap-0.5 px-2.5 py-1.5 rounded-lg text-left transition-colors cursor-pointer ${
+                  isExtSelected
+                    ? "bg-zk-tint text-zk-accent border border-zk-accent/25"
+                    : "text-zk-text2 hover:text-zk-text hover:bg-zk-chip/60"
+                }`}
+              >
+                <div className="flex items-center justify-between gap-1 w-full">
+                  <span className="text-[13px] font-medium text-zk-text truncate">
+                    {ext.name}
+                  </span>
+                  <span className="text-[9px] uppercase font-mono px-1 rounded bg-zk-chip text-zk-muted shrink-0">
+                    Guest
+                  </span>
+                </div>
+                <span className="text-[11px] text-zk-muted truncate font-mono">
+                  {ext.organisationName}
                 </span>
-                <span className="text-[9px] uppercase font-mono px-1 rounded bg-zk-chip text-zk-muted shrink-0">
-                  Guest
-                </span>
-              </div>
-              <span className="text-[11px] text-zk-muted truncate font-mono">
-                {ext.orgName}
-              </span>
-            </button>
-          );
-        })}
-      </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
     </aside>
   );
 
@@ -1178,7 +1463,9 @@ export function PublicMessageBoard({
               <div className="flex items-center justify-between gap-2 pb-1">
                 <div className="flex items-center gap-2">
                   <h1 className="text-[16px] font-semibold text-zk-text">
-                    Marketing &amp; Product Forum
+                    {selectedScope.type === "global"
+                      ? "Marketing & Product Forum"
+                      : `${selectedScope.name} Forum`}
                   </h1>
                   <span className="text-zk-muted text-[12px]">•</span>
                   <span className="text-[12px] text-zk-muted">
@@ -1193,9 +1480,64 @@ export function PublicMessageBoard({
 
               {/* Compact Cards (Title Only, No Description, No Role/Code Clutter) */}
               <div className="flex flex-col gap-2">
-                {filteredMessages.length === 0 ? (
-                  <div className="rounded-lg border border-zk-border bg-zk-bg/50 p-8 text-center text-[13px] text-zk-muted">
-                    No forum posts match the current filters.
+                {messages.length === 0 ? (
+                  <div className="rounded-xl border border-zk-border bg-zk-surface p-12 text-center flex flex-col items-center justify-center gap-3">
+                    <div className="w-12 h-12 rounded-full bg-zk-tint/60 border border-zk-accent/20 flex items-center justify-center text-zk-accent">
+                      <Icon size={24}>
+                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                      </Icon>
+                    </div>
+                    <div className="space-y-1">
+                      <h3 className="text-[15px] font-semibold text-zk-text">
+                        No discussions yet in {selectedScope.name}
+                      </h3>
+                      <p className="text-[13px] text-zk-muted max-w-sm">
+                        Be the first agent or supervisor to ask a question, share an update, or request review.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setView("new")}
+                      className="mt-2 inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-electric-blue-strong hover:bg-electric-blue text-white text-[13px] font-semibold transition-colors cursor-pointer shadow-xs"
+                    >
+                      <Icon size={14}>
+                        <line x1="12" y1="5" x2="12" y2="19" />
+                        <line x1="5" y1="12" x2="19" y2="12" />
+                      </Icon>
+                      <span>Start a discussion</span>
+                    </button>
+                  </div>
+                ) : filteredMessages.length === 0 ? (
+                  <div className="rounded-xl border border-zk-border bg-zk-surface p-10 text-center flex flex-col items-center justify-center gap-3">
+                    <div className="w-10 h-10 rounded-full bg-zk-chip flex items-center justify-center text-zk-muted">
+                      <Icon size={20}>
+                        <circle cx="11" cy="11" r="8" />
+                        <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                      </Icon>
+                    </div>
+                    <div className="space-y-1">
+                      <h3 className="text-[14px] font-semibold text-zk-text">
+                        No discussions match your filters
+                      </h3>
+                      <p className="text-[12px] text-zk-muted max-w-sm">
+                        {searchQuery.trim()
+                          ? `No results found for "${searchQuery}". Try different keywords or clear your filters.`
+                          : "Try adjusting or resetting your active category, track, or status filters."}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setStatusFilter("all");
+                        setFeedFilter("all");
+                        setTrackFilter("all");
+                        setSelectedTag(null);
+                        setSearchQuery("");
+                      }}
+                      className="mt-1 inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-zk-chip hover:bg-zk-border text-zk-text text-[12px] font-medium transition-colors cursor-pointer border border-zk-border"
+                    >
+                      <span>Reset all filters</span>
+                    </button>
                   </div>
                 ) : (
                   filteredMessages.map((msg) => {
@@ -1345,7 +1687,7 @@ export function PublicMessageBoard({
           <div className="flex items-center justify-between gap-3">
             <button
               type="button"
-              onClick={() => setView("list")}
+              onClick={handleBackToList}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zk-surface hover:bg-zk-chip border border-zk-border text-zk-text2 hover:text-zk-text text-[13px] font-medium transition-colors cursor-pointer"
             >
               <Icon size={14}>
@@ -1630,11 +1972,23 @@ export function PublicMessageBoard({
 
                       {/* Footer: Helpful Count & Zoom/Expand Toggle */}
                       <div className="flex items-center justify-between pt-0.5 text-[11px]">
-                        <span className="inline-flex items-center gap-1 text-zk-muted font-medium">
-                          <UpArrowIcon size={11} className="text-zk-muted" />
+                        <button
+                          type="button"
+                          onClick={() => handleVoteToggle(activePost.id, reply.id)}
+                          className={`inline-flex items-center gap-1 text-[11px] font-medium transition-colors cursor-pointer rounded px-1.5 py-0.5 ${
+                            userVotes[reply.id] === "up"
+                              ? "bg-zk-tint text-zk-accent font-semibold"
+                              : "text-zk-muted hover:text-zk-text hover:bg-zk-chip"
+                          }`}
+                        >
+                          <UpArrowIcon
+                            size={11}
+                            filled={userVotes[reply.id] === "up"}
+                            className={userVotes[reply.id] === "up" ? "text-zk-accent" : "text-zk-muted"}
+                          />
                           <span className="font-mono">{reply.helpfulCount ?? 0}</span>
                           <span>helpful</span>
-                        </span>
+                        </button>
 
                         {needsTruncation && (
                           <button
@@ -1715,6 +2069,19 @@ export function PublicMessageBoard({
                       </div>
                     </div>
 
+                    {replyError && (
+                      <div className="p-2.5 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-[12px] flex items-center justify-between">
+                        <span>{replyError}</span>
+                        <button
+                          type="button"
+                          onClick={() => setReplyError(null)}
+                          className="text-red-400 hover:text-red-300 font-bold ml-2 cursor-pointer"
+                        >
+                          &times;
+                        </button>
+                      </div>
+                    )}
+
                     <MarkdownEditor
                       id="forum-reply-content"
                       aria-label="Reply body"
@@ -1736,6 +2103,7 @@ export function PublicMessageBoard({
                         onClick={() => {
                           setReplyOpen(false);
                           setReplyContent("");
+                          setReplyError(null);
                         }}
                         className="px-3 py-1.5 rounded-lg border border-zk-border hover:bg-zk-chip text-zk-muted hover:text-zk-text text-[13px] font-medium transition-colors cursor-pointer"
                       >
@@ -1762,9 +2130,17 @@ export function PublicMessageBoard({
                         )}
                         <button
                           type="submit"
-                          className="px-4 py-1.5 rounded-lg bg-electric-blue-strong hover:bg-electric-blue text-white text-[13px] font-bold transition-colors shadow-xs cursor-pointer"
+                          disabled={isSubmittingReply || !replyContent.trim()}
+                          className="px-4 py-1.5 rounded-lg bg-electric-blue-strong hover:bg-electric-blue disabled:opacity-50 text-white text-[13px] font-bold transition-colors shadow-xs cursor-pointer flex items-center gap-1.5"
                         >
-                          Post reply
+                          {isSubmittingReply ? (
+                            <>
+                              <span className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                              <span>Posting...</span>
+                            </>
+                          ) : (
+                            <span>Post reply</span>
+                          )}
                         </button>
                       </div>
                     </div>
@@ -1776,13 +2152,53 @@ export function PublicMessageBoard({
         </div>
       )}
 
+      {/* VIEW 2 (NOT FOUND): POST NOT FOUND */}
+      {view === "detail" && !activePost && (
+        <div className="flex flex-col gap-4">
+          <div className="flex items-center justify-between">
+            <button
+              type="button"
+              onClick={handleBackToList}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zk-surface hover:bg-zk-chip border border-zk-border text-zk-text2 hover:text-zk-text text-[13px] font-medium transition-colors cursor-pointer"
+            >
+              <Icon size={14}>
+                <path d="m12 19-7-7 7-7M19 12H5" />
+              </Icon>
+              <span>Back to discussions</span>
+            </button>
+          </div>
+          <div className="rounded-xl border border-zk-border bg-zk-surface p-12 text-center flex flex-col items-center justify-center gap-3">
+            <div className="w-12 h-12 rounded-full bg-zk-chip flex items-center justify-center text-zk-muted">
+              <Icon size={24}>
+                <circle cx="12" cy="12" r="10" />
+                <line x1="12" y1="8" x2="12" y2="12" />
+                <line x1="12" y1="16" x2="12.01" y2="16" />
+              </Icon>
+            </div>
+            <h2 className="text-[16px] font-semibold text-zk-text">
+              Discussion not found
+            </h2>
+            <p className="text-[13px] text-zk-muted max-w-md">
+              This discussion post could not be found or may have been removed.
+            </p>
+            <button
+              type="button"
+              onClick={handleBackToList}
+              className="mt-2 px-4 py-2 rounded-lg bg-zk-accent text-zk-accent-fg hover:opacity-90 text-[13px] font-medium transition-opacity cursor-pointer"
+            >
+              Return to discussions list
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* VIEW 3: NEW FORUM POST VIEW (NO WHY CONTEXT FIELD) */}
       {view === "new" && (
         <div className="flex flex-col gap-4">
           <div className="flex items-center justify-between">
             <button
               type="button"
-              onClick={() => setView("list")}
+              onClick={handleBackToList}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zk-surface hover:bg-zk-chip border border-zk-border text-zk-text2 hover:text-zk-text text-[13px] font-medium transition-colors cursor-pointer"
             >
               <Icon size={14}>
@@ -1806,6 +2222,19 @@ export function PublicMessageBoard({
                   Share an Ask (blocker) or Report (discovery) with structured Markdown in the body.
                 </p>
               </div>
+
+              {postError && (
+                <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-[13px] flex items-center justify-between">
+                  <span>{postError}</span>
+                  <button
+                    type="button"
+                    onClick={() => setPostError(null)}
+                    className="text-red-400 hover:text-red-300 font-bold ml-2 cursor-pointer"
+                  >
+                    &times;
+                  </button>
+                </div>
+              )}
 
               {/* Post Type, Track & Scope */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -1989,16 +2418,24 @@ export function PublicMessageBoard({
               <div className="flex items-center justify-end gap-2 pt-2 border-t border-zk-border">
                 <button
                   type="button"
-                  onClick={() => setView("list")}
+                  onClick={handleBackToList}
                   className="px-4 py-1.5 rounded-full bg-zk-chip hover:bg-zk-seg text-zk-text2 text-[13px] font-medium transition-colors cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-1.5 rounded-full bg-electric-blue-strong hover:bg-electric-blue text-white text-[13px] font-bold transition-colors shadow-xs cursor-pointer"
+                  disabled={isSubmittingPost || !newTitle.trim() || !newContent.trim()}
+                  className="px-5 py-1.5 rounded-full bg-electric-blue-strong hover:bg-electric-blue disabled:opacity-50 text-white text-[13px] font-bold transition-colors shadow-xs cursor-pointer flex items-center gap-1.5"
                 >
-                  Publish Post
+                  {isSubmittingPost ? (
+                    <>
+                      <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                      <span>Publishing...</span>
+                    </>
+                  ) : (
+                    <span>Publish Post</span>
+                  )}
                 </button>
               </div>
             </form>

@@ -23,8 +23,19 @@ import { targetAddress } from "./target";
  * Nothing here logs what was found.
  */
 
-/** At most this many parts are done in one sweep (the sweep runs every minute). */
-export const FALLBACK_PARTS_PER_SWEEP = 3;
+/**
+ * At most this many parts are done in one sweep (the sweep runs every minute), all at once, each within
+ * FALLBACK_PART_TIMEOUT_MS. 6 clears a typical 17-part check in about three sweeps; `SECURITY_FALLBACK_PARTS_PER_SWEEP`
+ * changes it (1 to FALLBACK_PARTS_PER_SWEEP_MAX), to trade speed against the AI's cost and rate limits.
+ */
+export const FALLBACK_PARTS_PER_SWEEP = 6;
+export const FALLBACK_PARTS_PER_SWEEP_MAX = 20;
+
+export function fallbackPartsPerSweep(env: Record<string, string | undefined> = process.env): number {
+  const raw = Number(env.SECURITY_FALLBACK_PARTS_PER_SWEEP?.trim());
+  if (!Number.isInteger(raw) || raw < 1) return FALLBACK_PARTS_PER_SWEEP;
+  return Math.min(raw, FALLBACK_PARTS_PER_SWEEP_MAX);
+}
 /** One part may take this long before it is given back. */
 export const FALLBACK_PART_TIMEOUT_MS = 50_000;
 const EXCERPT_MAX = 6_000;
@@ -51,6 +62,8 @@ export type FallbackDeps = {
   ai?: SecurityAi | null;
   readPage?: PageReader;
   scan?: typeof previewScan;
+  /** Parts per sweep; default `fallbackPartsPerSweep()`. */
+  partsPerSweep?: number;
 };
 
 type Part = { id: string; title: string; instructions: string | null; check: { target: { kind: "website" | "server" | "repo"; value: string } } };
@@ -170,7 +183,7 @@ export async function sweepFallback(db: PrismaClient, now = new Date(), deps: Fa
       check: { status: "checking", ...provenTargetWhere() },
     },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-    take: FALLBACK_PARTS_PER_SWEEP,
+    take: deps.partsPerSweep ?? fallbackPartsPerSweep(),
     select: { id: true, title: true, instructions: true, check: { select: { target: { select: { kind: true, value: true } } } } },
   });
   if (waiting.length === 0) return { worked: 0, failed: 0 };

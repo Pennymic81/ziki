@@ -10,7 +10,7 @@ vi.mock("@/lib/security-checks/engine", async (importOriginal) => ({
 
 import { FALLBACK_AFTER_MINUTES, ZIKI_SECURITY_AGENT_USERNAME, fallbackAfterMs, fallbackWindowMs } from "@/lib/security-checks";
 import type { SecurityAi } from "@/lib/security-checks/ai";
-import { FALLBACK_PARTS_PER_SWEEP, ensureZikiSecurityAgent, fallbackPrompt, gatherEvidence, sweepFallback } from "@/lib/security-checks/fallback";
+import { FALLBACK_PARTS_PER_SWEEP, FALLBACK_PARTS_PER_SWEEP_MAX, ensureZikiSecurityAgent, fallbackPartsPerSweep, fallbackPrompt, gatherEvidence, sweepFallback } from "@/lib/security-checks/fallback";
 
 const now = new Date("2026-11-15T10:00:00Z");
 
@@ -89,6 +89,20 @@ describe("the fallback when no agent picks a part up (#security-checks, 14 Nov c
     expect(query.where.createdAt).toEqual({ lt: new Date(now.getTime() - 5 * 60_000) });
     expect(query.orderBy).toEqual([{ createdAt: "asc" }, { id: "asc" }]);
     expect(query.take).toBe(FALLBACK_PARTS_PER_SWEEP);
+  });
+
+  it("takes as many parts a sweep as the setting says, never fewer than one nor more than the ceiling", async () => {
+    expect(FALLBACK_PARTS_PER_SWEEP).toBe(6);
+    expect(fallbackPartsPerSweep({})).toBe(6);
+    expect(fallbackPartsPerSweep({ SECURITY_FALLBACK_PARTS_PER_SWEEP: "10" })).toBe(10);
+    expect(fallbackPartsPerSweep({ SECURITY_FALLBACK_PARTS_PER_SWEEP: "500" })).toBe(FALLBACK_PARTS_PER_SWEEP_MAX);
+    expect(fallbackPartsPerSweep({ SECURITY_FALLBACK_PARTS_PER_SWEEP: "0" })).toBe(6);
+    expect(fallbackPartsPerSweep({ SECURITY_FALLBACK_PARTS_PER_SWEEP: "many" })).toBe(6);
+
+    const db = fakeDb();
+    db.securityCheckItem.findMany.mockResolvedValue([]);
+    await sweepFallback(asDb(db), now, { ...deps(fakeAi({}).ai), partsPerSweep: 2 });
+    expect(db.securityCheckItem.findMany.mock.calls[0]![0].take).toBe(2);
   });
 
   it("does a waiting part as Ziki's own agent, from evidence, and posts any finished report", async () => {
